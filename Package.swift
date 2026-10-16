@@ -12,7 +12,12 @@ let package = Package(
         .executable(name: "train", targets: ["train"]),
         .executable(name: "prepare", targets: ["prepare"]),
         .executable(name: "classify", targets: ["classify"]),
-        .executable(name: "benchmark", targets: ["benchmark"])
+        .executable(name: "benchmark", targets: ["benchmark"]),
+        .executable(name: "label", targets: ["label"]),
+        .executable(name: "prepare-digits", targets: ["prepare-digits"]),
+        .executable(name: "train-digits", targets: ["train-digits"]),
+        .executable(name: "read", targets: ["read"]),
+        .executable(name: "synth", targets: ["synth"])
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.21.0")
@@ -46,6 +51,20 @@ let package = Package(
         .executableTarget(name: "classify", dependencies: ["Misago"], path: "script/classify"),
         // CPU inference speed.
         .executableTarget(name: "benchmark", dependencies: ["Misago"], path: "script/benchmark"),
+        // Number-field labeling with the system OCR (Vision), for review before training the reader.
+        .executableTarget(name: "label", dependencies: ["Misago"], path: "script/label"),
+        // Labels JSONL -> digit-strip dataset.
+        .executableTarget(name: "prepare-digits", dependencies: ["Misago"], path: "script/prepare-digits"),
+        // Digit-strip dataset -> CTC training -> weights JSON.
+        .executableTarget(
+            name: "train-digits",
+            dependencies: ["Misago", "MisagoTraining", .product(name: "MLX", package: "mlx-swift")],
+            path: "script/train-digits"
+        ),
+        // Whole pipeline on one image: class and number.
+        .executableTarget(name: "read", dependencies: ["Misago"], path: "script/read"),
+        // Synthetic number fields (CoreText) for pretraining the digit reader.
+        .executableTarget(name: "synth", dependencies: ["Misago"], path: "script/synth"),
         .testTarget(
             name: "MisagoTests",
             dependencies: ["Misago", "MisagoTraining", .product(name: "MLX", package: "mlx-swift")],

@@ -153,6 +153,42 @@ public struct Augmenter {
         return out
     }
 
+    /// Color jitter and noise on a digit strip (no bars or cutouts: the field must stay readable).
+    public mutating func augment(_ strip: DigitStrip) -> DigitStrip {
+        var p = strip.pixels
+        let ch = DigitStrip.channels
+        let brightness = uniform(-options.maxBrightnessShift...options.maxBrightnessShift)
+        let contrast = uniform(options.contrastRange)
+        var gain = [Float](repeating: 1.0, count: ch)
+        var c = 0
+        while c < ch {
+            gain[c] = 1.0 + uniform(-options.maxChannelGain...options.maxChannelGain)
+            c += 1
+        }
+        var i = 0
+        while i < p.count {
+            var v = ((p[i] - 0.5) * contrast + 0.5 + brightness) * gain[i % ch]
+            if 0.0 < options.noiseAmplitude {
+                v += uniform(-options.noiseAmplitude...options.noiseAmplitude)
+            }
+            p[i] = ScreenImage.clamp01(v)
+            i += 1
+        }
+        return (try? DigitStrip(pixels: p)) ?? strip
+    }
+
+    /// A jittered version of a crop rectangle: position moved by up to `shift` of the height in each
+    /// direction and size scaled by up to ±`scale`, so the reader tolerates imprecise regions.
+    public mutating func jitter(x: Int, y: Int, width: Int, height: Int, shift: Float = 0.3, scale: Float = 0.1) -> (x: Int, y: Int, width: Int, height: Int) {
+        let dx = uniform(-shift...shift) * Float(height)
+        let dy = uniform(-shift...shift) * Float(height)
+        let sw = 1.0 + uniform(-scale...scale)
+        let sh = 1.0 + uniform(-scale...scale)
+        let w = max(1, Int((Float(width) * sw).rounded()))
+        let h = max(1, Int((Float(height) * sh).rounded()))
+        return (Int((Float(x) + dx).rounded()), Int((Float(y) + dy).rounded()), w, h)
+    }
+
     private func fill(_ p: inout [Float], x0: Int, y0: Int, x1: Int, y1: Int, value: Float) {
         let w = ScreenImage.width
         let ch = ScreenImage.channels

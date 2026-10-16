@@ -1,8 +1,8 @@
-import Accelerate
 import Foundation
 
 /// CPU inference for the Hawk model over a whole, fixed-length frame sequence (one image).
-/// Linear layers run as matrix products over all frames (Accelerate); gates and the recurrence use SIMD8.
+/// Linear layers run as matrix products over all frames (`Matrix.gemm`, pure Swift SIMD); gates and the
+/// recurrence use SIMD8. Nothing here depends on Apple frameworks, so it builds on Linux as well.
 /// `modelDim`, `rnnDim` and `mlpDim` must be multiples of 8.
 ///
 /// Unlike haitaka's streaming network, every frame is available up front, so each layer pads the sequence
@@ -55,6 +55,62 @@ public final class HawkNetwork: @unchecked Sendable {
         if frames <= 0 {
             return w.bOut
         }
+        let normed = normedHidden(flatFeatures: chunk, frames: frames)
+        // Mean of the normed frames, then one projection: logits are linear in the normed vector.
+        var pooled = [Float](repeating: 0.0, count: d)
+        var f = 0
+        while f < frames {
+            var c = 0
+            while c < d {
+                pooled[c] += normed[f * d + c]
+                c += 1
+            }
+            f += 1
+        }
+        let inv = 1.0 / Float(frames)
+        var c = 0
+        while c < d {
+            pooled[c] *= inv
+            c += 1
+        }
+        var out = w.bOut
+        Self.gemm(pooled, w.wOut, &out, m: 1, n: w.outputDim, k: d, beta: 1.0)
+        return out
+    }
+
+    /// Per-frame logits [frames][outputDim], for sequence labelling (CTC).
+    public func frameLogits(flatFeatures chunk: [Float], frames: Int) -> [[Float]] {
+        let w = weights
+        let d = w.modelDim
+        if frames <= 0 {
+            return []
+        }
+        let normed = normedHidden(flatFeatures: chunk, frames: frames)
+        var logits = [Float](repeating: 0.0, count: frames * w.outputDim)
+        var f = 0
+        while f < frames {
+            var c = 0
+            while c < w.outputDim {
+                logits[f * w.outputDim + c] = w.bOut[c]
+                c += 1
+            }
+            f += 1
+        }
+        Self.gemm(normed, w.wOut, &logits, m: frames, n: w.outputDim, k: d, beta: 1.0)
+        var rows: [[Float]] = []
+        rows.reserveCapacity(frames)
+        f = 0
+        while f < frames {
+            rows.append(Array(logits[(f * w.outputDim)..<((f + 1) * w.outputDim)]))
+            f += 1
+        }
+        return rows
+    }
+
+    /// Input projection, all layers and the final RMSNorm: [frames, modelDim].
+    private func normedHidden(flatFeatures chunk: [Float], frames: Int) -> [Float] {
+        let w = weights
+        let d = w.modelDim
         var x = [Float](repeating: 0.0, count: frames * d)
         var f = 0
         while f < frames {
@@ -73,26 +129,7 @@ public final class HawkNetwork: @unchecked Sendable {
         }
         var normed = [Float](repeating: 0.0, count: frames * d)
         Self.rmsNorm(x, w.finalNorm, &normed, frames: frames, width: d)
-        // Mean of the normed frames, then one projection: logits are linear in the normed vector.
-        var pooled = [Float](repeating: 0.0, count: d)
-        f = 0
-        while f < frames {
-            var c = 0
-            while c < d {
-                pooled[c] += normed[f * d + c]
-                c += 1
-            }
-            f += 1
-        }
-        let inv = 1.0 / Float(frames)
-        var c = 0
-        while c < d {
-            pooled[c] *= inv
-            c += 1
-        }
-        var out = w.bOut
-        Self.gemm(pooled, w.wOut, &out, m: 1, n: w.outputDim, k: d, beta: 1.0)
-        return out
+        return normed
     }
 
     /// Calibrated class probabilities from classification logits.
@@ -215,8 +252,7 @@ public final class HawkNetwork: @unchecked Sendable {
 
     static func gemmRaw(_ a: UnsafePointer<Float>, _ lda: Int, _ b: UnsafePointer<Float>, _ ldb: Int,
                         _ c: UnsafeMutablePointer<Float>, _ ldc: Int, m: Int, n: Int, k: Int, beta: Float) {
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, Int32(m), Int32(n), Int32(k),
-                    1.0, a, Int32(lda), b, Int32(ldb), beta, c, Int32(ldc))
+        Matrix.gemm(a, lda, b, ldb, c, ldc, m: m, n: n, k: k, beta: beta)
     }
 
     static func rmsNorm(_ x: [Float], _ gain: [Float], _ out: inout [Float], frames: Int, width: Int) {

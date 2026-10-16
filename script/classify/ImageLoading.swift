@@ -20,9 +20,8 @@ func loadRGB(path: String) throws -> (width: Int, height: Int, rgb: [UInt8]) {
         ) else {
             return false
         }
-        // CGContext draws with the origin at the bottom-left; flip so row 0 is the top of the image.
-        context.translateBy(x: 0, y: CGFloat(height))
-        context.scaleBy(x: 1, y: -1)
+        // A bitmap context's first row in memory is the top of the picture, so drawing the image unflipped
+        // leaves row 0 at the top (flipping here would turn the picture upside down).
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
         return true
     }

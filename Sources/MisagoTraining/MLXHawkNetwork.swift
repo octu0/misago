@@ -342,7 +342,12 @@ public final class MLXHawkNetwork: Module, @unchecked Sendable {
     }
 
     public func exportWeights(classes: ClassList, calibration: VectorCalibration? = nil) -> HawkWeights {
-        precondition(classes.count == outputDim, "class count must equal outputDim")
+        return exportWeights(classNames: classes.names, calibration: calibration)
+    }
+
+    /// Export with arbitrary output names (the digit vocabulary for the reader).
+    public func exportWeights(classNames: [String], calibration: VectorCalibration? = nil) -> HawkWeights {
+        precondition(classNames.count == outputDim, "name count must equal outputDim")
         eval(self)
         func values(_ x: MLXArray) -> [Float] {
             return x.asArray(Float.self)
@@ -371,7 +376,7 @@ public final class MLXHawkNetwork: Module, @unchecked Sendable {
             finalNorm: values(finalNorm),
             wOut: values(wOut),
             bOut: values(bOut),
-            classNames: classes.names,
+            classNames: classNames,
             calibrationScale: calibration?.scale ?? 1.0,
             calibrationBias: calibration?.bias
         )

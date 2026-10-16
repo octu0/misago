@@ -13,6 +13,17 @@ public enum HawkShape {
     public static let convRight = 2
 }
 
+/// Shape of the digit reader's Hawk (about 0.45M parameters) over the stem's 160 frames.
+public enum DigitHawkShape {
+    public static let numLayers = 3
+    public static let modelDim = 96
+    public static let rnnDim = 128
+    public static let mlpDim = 288
+    public static let heads = 4
+    public static let convWidth = 4
+    public static let convRight = 2
+}
+
 /// Weights of the Hawk model (the recurrent-only variant of Griffin, De et al. 2024), ported from haitaka.
 /// Each layer is RMSNorm → recurrent block → residual, then RMSNorm → gated MLP → residual.
 /// The recurrent block multiplies a GeLU branch with a linear → conv → RG-LRU branch, then projects back.
