@@ -15,7 +15,9 @@ DIGIT_EPOCHS ?= 40
 DIGIT_WEIGHTS ?= .tmp/weights/digits.json
 ARGS ?=
 
-.PHONY: all build build-train build-train-digits test train eval train-digits prepare prepare-digits label synth classify read benchmark clean help
+IMAGE ?= misago-api
+
+.PHONY: all build build-train build-train-digits test train eval train-digits prepare prepare-digits label synth classify read benchmark api docker clean help
 
 all: build test
 
@@ -66,6 +68,14 @@ read:
 benchmark:
 	swift run -c release benchmark $(ARGS)
 
+# HTTP API (Vapor). Models are read from .tmp/models (see MISAGO_* in Sources/MisagoAPI), the page from .tmp/public.
+api:
+	swift run -c release misago-api serve --env development $(ARGS)
+
+# Linux container for Cloud Run (needs .tmp/models and .tmp/public staged first).
+docker:
+	docker build -t $(IMAGE) .
+
 clean:
 	xcodebuild clean -scheme $(SCHEME_PKG) -destination '$(DESTINATION)' -configuration $(CONFIG)
 	swift package clean
@@ -84,4 +94,6 @@ help:
 	@echo "make classify ARGS=\"--weights <model.json> <image>...\""
 	@echo "make read ARGS=\"--weights <model.json> --digit-weights <digits.json> --regions <regions.json> <image>...\""
 	@echo "make benchmark ARGS=\"[--weights <model.json>]\""
+	@echo "make api          Run the HTTP API locally (models in .tmp/models, page in .tmp/public)"
+	@echo "make docker       Build the Cloud Run image (IMAGE=misago-api)"
 	@echo "make clean        Remove build products"

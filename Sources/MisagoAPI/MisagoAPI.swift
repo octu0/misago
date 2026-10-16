@@ -1,0 +1,121 @@
+import Foundation
+import Vapor
+import Misago
+import ImageDecoding
+
+/// HTTP front end for the screen reader: `POST /api/read` with an image (multipart field `image`, or the raw
+/// image as the body) returns the class, its calibrated probability, the number read and timings. Static files
+/// (the upload page) are served from `MISAGO_PUBLIC`.
+///
+/// Environment: MISAGO_WEIGHTS (classifier JSON), MISAGO_DIGIT_WEIGHTS (reader JSON), MISAGO_REGIONS
+/// (regions JSON), MISAGO_PUBLIC (static directory, default .tmp/public), MISAGO_THRESHOLD (default 0.5),
+/// PORT (default 8080, set by Cloud Run).
+struct ReadResponse: Content {
+    let `class`: String
+    let probability: Float
+    let probabilities: [String: Float]
+    let number: Int
+    let digits: String?
+    let confidence: Float?
+    let ms: Double
+    let width: Int
+    let height: Int
+}
+
+struct ErrorResponse: Content {
+    let error: String
+}
+
+struct Upload: Content {
+    var image: File
+}
+
+@main
+struct MisagoAPI {
+    static func main() async throws {
+        var env = try Environment.detect()
+        try LoggingSystem.bootstrap(from: &env)
+        let app = try await Application.make(env)
+        do {
+            try configure(app)
+            try await app.execute()
+        } catch {
+            app.logger.report(error: error)
+            try? await app.asyncShutdown()
+            throw error
+        }
+        try await app.asyncShutdown()
+    }
+
+    static func environment(_ key: String, default value: String) -> String {
+        return Environment.get(key) ?? value
+    }
+
+    static func configure(_ app: Application) throws {
+        let weightsPath = environment("MISAGO_WEIGHTS", default: ".tmp/models/classifier.json")
+        let digitWeightsPath = environment("MISAGO_DIGIT_WEIGHTS", default: ".tmp/models/digits.json")
+        let regionsPath = environment("MISAGO_REGIONS", default: ".tmp/models/regions.json")
+        let publicDirectory = environment("MISAGO_PUBLIC", default: ".tmp/public")
+        let threshold = Float(environment("MISAGO_THRESHOLD", default: "0.5")) ?? 0.5
+        app.http.server.configuration.hostname = environment("HOST", default: "0.0.0.0")
+        app.http.server.configuration.port = Int(environment("PORT", default: "8080")) ?? 8080
+        app.routes.defaultMaxBodySize = "32mb"
+
+        let classifier = try ImageClassifier(weights: try HawkWeights.load(from: URL(fileURLWithPath: weightsPath)), threshold: threshold)
+        let digits = try DigitReader(weights: try DigitReaderWeights.load(from: URL(fileURLWithPath: digitWeightsPath)))
+        let regions = try RegionTable.load(from: URL(fileURLWithPath: regionsPath))
+        let reader = ScreenReader(classifier: classifier, digitReader: digits, regions: regions)
+        app.logger.info("models loaded: classes \(classifier.classes.names.joined(separator: ", ")), regions \(regions.regions.keys.sorted().joined(separator: ", "))")
+
+        if FileManager.default.fileExists(atPath: publicDirectory) {
+            app.middleware.use(FileMiddleware(publicDirectory: publicDirectory, defaultFile: "index.html"))
+        } else {
+            app.logger.warning("public directory \(publicDirectory) not found; only the API is served")
+        }
+
+        app.get("healthz") { _ in
+            return "ok"
+        }
+
+        app.on(.POST, "api", "read", body: .collect(maxSize: "32mb")) { req async throws -> Response in
+            let bytes: Data
+            if req.headers.contentType?.type == "multipart" {
+                let upload = try req.content.decode(Upload.self)
+                bytes = Data(buffer: upload.image.data)
+            } else if let body = req.body.data {
+                bytes = Data(buffer: body)
+            } else {
+                throw Abort(.badRequest, reason: "send the image as multipart field `image` or as the request body")
+            }
+            let decoded: (width: Int, height: Int, rgb: [UInt8])
+            do {
+                decoded = try ImageDecoder.decodeRGB(bytes)
+            } catch {
+                throw Abort(.unprocessableEntity, reason: "cannot decode image: \(error)")
+            }
+            let start = DispatchTime.now().uptimeNanoseconds
+            let result = try reader.read(width: decoded.width, height: decoded.height, rgb: decoded.rgb)
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000.0
+            var probabilities: [String: Float] = [:]
+            var c = 0
+            while c < result.verdict.probabilities.count {
+                probabilities[classifier.classes[c]] = result.verdict.probabilities[c]
+                c += 1
+            }
+            let payload = ReadResponse(
+                class: result.verdict.className,
+                probability: result.verdict.probability,
+                probabilities: probabilities,
+                number: result.number,
+                digits: result.reading?.digits,
+                confidence: result.reading?.confidence,
+                ms: (ms * 100).rounded() / 100,
+                width: decoded.width,
+                height: decoded.height
+            )
+            let response = Response(status: .ok)
+            try response.content.encode(payload, as: .json)
+            return response
+        }
+    }
+}
