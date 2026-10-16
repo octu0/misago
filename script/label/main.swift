@@ -233,51 +233,65 @@ do {
 let labeled = rows.filter { $0.digits.isEmpty != true }.count
 print("wrote \(outPath): \(rows.count) rows, \(labeled) with digits")
 
-// Contact sheets: 16 crops per sheet, each scaled to 800 px wide, with the row index drawn as a bar of ticks.
+// Contact sheets: 16 crops per sheet, one numbered series per class, each crop scaled to 800 px wide.
+// index.txt maps sheet and row to the file and its label so corrections can be written straight into an
+// overrides file.
 if sheetsDir.isEmpty != true {
     try? FileManager.default.createDirectory(atPath: sheetsDir, withIntermediateDirectories: true)
     let perSheet = 16
     let cellW = 800
-    var sheet = 0
-    var start = 0
-    while start < rows.count {
-        let end = min(rows.count, start + perSheet)
-        var heights: [Int] = []
-        var i = start
-        while i < end {
-            if let img = rows[i].image {
-                heights.append(max(1, Int(Double(img.height) * Double(cellW) / Double(img.width))))
-            } else {
-                heights.append(20)
-            }
-            i += 1
-        }
-        let total = heights.reduce(0, +) + (end - start) * 4
-        if let context = CGContext(data: nil, width: cellW, height: total, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) {
-            context.setFillColor(CGColor(red: 1, green: 0, blue: 1, alpha: 1))
-            context.fill(CGRect(x: 0, y: 0, width: cellW, height: total))
-            context.interpolationQuality = .high
-            var yTop = 0
-            i = start
+    var indexLines: [String] = []
+    var classOrder: [String] = []
+    for row in rows where classOrder.contains(row.className) != true {
+        classOrder.append(row.className)
+    }
+    for className in classOrder {
+        let classRows = rows.filter { $0.className == className }
+        var sheet = 0
+        var start = 0
+        while start < classRows.count {
+            let end = min(classRows.count, start + perSheet)
+            let name = String(format: "sheet_%@_%03d.png", className, sheet)
+            var heights: [Int] = []
+            var i = start
             while i < end {
-                let h = heights[i - start]
-                if let img = rows[i].image {
-                    // CGContext origin is bottom-left.
-                    context.draw(img, in: CGRect(x: 0, y: total - yTop - h, width: cellW, height: h))
+                if let img = classRows[i].image {
+                    heights.append(max(1, Int(Double(img.height) * Double(cellW) / Double(img.width))))
+                } else {
+                    heights.append(20)
                 }
-                yTop += h + 4
+                indexLines.append("\(name)\trow \(i - start)\t\(classRows[i].digits.isEmpty ? "-" : classRows[i].digits)\t\((classRows[i].path as NSString).lastPathComponent)")
                 i += 1
             }
-            if let image = context.makeImage() {
-                let url = URL(fileURLWithPath: sheetsDir).appendingPathComponent(String(format: "sheet_%03d.png", sheet))
-                if let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) {
-                    CGImageDestinationAddImage(dest, image, nil)
-                    CGImageDestinationFinalize(dest)
+            let total = heights.reduce(0, +) + (end - start) * 4
+            if let context = CGContext(data: nil, width: cellW, height: total, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) {
+                context.setFillColor(CGColor(red: 1, green: 0, blue: 1, alpha: 1))
+                context.fill(CGRect(x: 0, y: 0, width: cellW, height: total))
+                context.interpolationQuality = .high
+                var yTop = 0
+                i = start
+                while i < end {
+                    let h = heights[i - start]
+                    if let img = classRows[i].image {
+                        // CGContext origin is bottom-left.
+                        context.draw(img, in: CGRect(x: 0, y: total - yTop - h, width: cellW, height: h))
+                    }
+                    yTop += h + 4
+                    i += 1
+                }
+                if let image = context.makeImage() {
+                    let url = URL(fileURLWithPath: sheetsDir).appendingPathComponent(name)
+                    if let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) {
+                        CGImageDestinationAddImage(dest, image, nil)
+                        CGImageDestinationFinalize(dest)
+                    }
                 }
             }
+            sheet += 1
+            start = end
         }
-        sheet += 1
-        start = end
+        print("wrote \(sheet) sheets for \(className) to \(sheetsDir)")
     }
-    print("wrote \(sheet) sheets to \(sheetsDir) (rows \(perSheet) per sheet, in JSONL order)")
+    try? (indexLines.joined(separator: "\n") + "\n").write(toFile: (sheetsDir as NSString).appendingPathComponent("index.txt"), atomically: true, encoding: .utf8)
+    print("wrote \(sheetsDir)/index.txt (sheet, row, label, file)")
 }

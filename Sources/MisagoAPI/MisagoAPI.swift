@@ -15,6 +15,8 @@ struct ReadResponse: Content {
     let probability: Float
     let probabilities: [String: Float]
     let number: Int
+    /// 2 = win, 1 = loss, 0 = draw, −1 = not a result screen (class names ending in _win / _lose / _draw).
+    let outcome: Int
     let digits: String?
     let confidence: Float?
     let ms: Double
@@ -122,7 +124,7 @@ struct MisagoAPI {
             }
             let result = ScreenReading(verdict: verdict, reading: reading)
             let ms = now() - start
-            req.logger.info("read \(result.verdict.className) number=\(result.number) decode=\(round2(decodeMs))ms total=\(round2(ms))ms (normalize \(round2(normalizeMs)), classify \(round2(classifyMs)), extract \(round2(extractMs)), read \(round2(readMs)))")
+            req.logger.info("read \(result.verdict.className) number=\(result.number) outcome=\(result.outcome) decode=\(round2(decodeMs))ms total=\(round2(ms))ms (normalize \(round2(normalizeMs)), classify \(round2(classifyMs)), extract \(round2(extractMs)), read \(round2(readMs)))")
             var probabilities: [String: Float] = [:]
             var c = 0
             while c < result.verdict.probabilities.count {
@@ -134,6 +136,7 @@ struct MisagoAPI {
                 probability: result.verdict.probability,
                 probabilities: probabilities,
                 number: result.number,
+                outcome: result.outcome,
                 digits: result.reading?.digits,
                 confidence: result.reading?.confidence,
                 ms: round2(ms),

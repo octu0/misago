@@ -15,6 +15,21 @@ public struct ImageVerdict: Sendable, Equatable {
     public var isOther: Bool {
         return classIndex == 0
     }
+
+    /// Match outcome encoded in the class name: `_win` → 2, `_lose` → 1, `_draw` → 0, anything else −1
+    /// (not a result screen). Datasets name their classes, so this convention keeps the code free of game names.
+    public var outcome: Int {
+        if className.hasSuffix("_win") {
+            return 2
+        }
+        if className.hasSuffix("_lose") {
+            return 1
+        }
+        if className.hasSuffix("_draw") {
+            return 0
+        }
+        return -1
+    }
 }
 
 /// Image → row-scan frames → Hawk → calibrated class probabilities.

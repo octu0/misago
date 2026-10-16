@@ -38,6 +38,18 @@ final class ImageClassifierTests: XCTestCase {
         XCTAssertEqual(biased.classify(image).className, "b_home")
     }
 
+    func testOutcomeFollowsClassNameSuffix() {
+        func verdict(_ name: String) -> ImageVerdict {
+            return ImageVerdict(classIndex: 1, className: name, probability: 0.9, probabilities: [0.1, 0.9], logits: [0, 1])
+        }
+        XCTAssertEqual(verdict("a_match_win").outcome, 2)
+        XCTAssertEqual(verdict("a_match_lose").outcome, 1)
+        XCTAssertEqual(verdict("a_match_draw").outcome, 0)
+        XCTAssertEqual(verdict("a_home").outcome, -1)
+        XCTAssertEqual(verdict("other").outcome, -1)
+        XCTAssertEqual(ScreenReading(verdict: verdict("a_match_win"), reading: nil).outcome, 2)
+    }
+
     func testInvalidClassNamesAreRejected() {
         var w = weights(bOut: [0.0, 0.0, 0.0], calibration: .identity(classCount: 3))
         w = HawkWeights(

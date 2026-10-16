@@ -15,6 +15,11 @@ public struct ScreenReading: Sendable, Equatable {
     public var number: Int {
         return reading?.value ?? -1
     }
+
+    /// 2 win, 1 loss, 0 draw, −1 not a result screen (see `ImageVerdict.outcome`).
+    public var outcome: Int {
+        return verdict.outcome
+    }
 }
 
 /// Classifier → crop region of the winning class → digit reader.

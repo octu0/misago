@@ -72,6 +72,7 @@ for path in imagePaths {
             "class": result.verdict.className,
             "probability": Double(String(format: "%.4f", result.verdict.probability)) ?? 0.0,
             "number": result.number,
+            "outcome": result.outcome,
             "ms": Double(String(format: "%.2f", ms)) ?? 0.0
         ]
         if let reading = result.reading {
