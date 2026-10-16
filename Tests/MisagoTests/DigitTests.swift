@@ -97,6 +97,39 @@ final class DigitTests: XCTestCase {
         XCTAssertEqual(try reader.sample(at: 1).strip, DigitStrip())
     }
 
+    /// Resolution loss keeps a flat strip flat and a sharp edge becomes a ramp.
+    func testStripDegradationBlursButKeepsRange() throws {
+        var options = Augmenter.Options()
+        options.degradeProbability = 1.0
+        options.minDegradeScale = 0.4
+        options.noiseAmplitude = 0.0
+        options.maxBrightnessShift = 0.0
+        options.contrastRange = 1.0...1.0
+        options.maxChannelGain = 0.0
+        var pixels = [Float](repeating: 0.0, count: DigitStrip.pixelCount)
+        var y = 0
+        while y < DigitStrip.height {
+            var x = DigitStrip.width / 2
+            while x < DigitStrip.width {
+                let i = (y * DigitStrip.width + x) * 3
+                pixels[i] = 1.0
+                pixels[i + 1] = 1.0
+                pixels[i + 2] = 1.0
+                x += 1
+            }
+            y += 1
+        }
+        var a = Augmenter(seed: 9, options: options)
+        let blurred = a.augment(try DigitStrip(pixels: pixels))
+        let mid = DigitStrip.height / 2
+        XCTAssertEqual(blurred.pixels[(mid * DigitStrip.width + 10) * 3], 0.0, accuracy: 1e-4)
+        XCTAssertEqual(blurred.pixels[(mid * DigitStrip.width + DigitStrip.width - 10) * 3], 1.0, accuracy: 1e-4)
+        // Near the edge the value is in between: the step became a ramp.
+        let edge = blurred.pixels[(mid * DigitStrip.width + DigitStrip.width / 2) * 3]
+        XCTAssertGreaterThan(edge, 0.05)
+        XCTAssertLessThan(edge, 0.95)
+    }
+
     func testStripAugmentationIsDeterministicAndBounded() throws {
         let strip = try DigitStrip(bytes: (0..<DigitStrip.pixelCount).map { UInt8(($0 * 7) % 256) })
         var a = Augmenter(seed: 5)

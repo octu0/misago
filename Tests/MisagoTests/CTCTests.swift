@@ -8,7 +8,6 @@ final class CTCTests: XCTestCase {
     override func setUpWithError() throws {
         try super.setUpWithError()
         try MLXTestEnvironment.skipIfMetallibUnavailable()
-        Device.setDefault(device: .gpu)
         MLXRandom.seed(3)
     }
 

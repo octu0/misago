@@ -23,6 +23,10 @@ public struct Augmenter {
         public var cutoutCount: ClosedRange<Int> = 0...3
         public var maxCutoutFraction: Float = 0.35
         public var noiseAmplitude: Float = 0.03
+        /// Probability of resolution loss on a strip, and the smallest intermediate scale: the strip is shrunk
+        /// (area average) and enlarged back (bilinear), as a crop from a 720p screenshot would look.
+        public var degradeProbability: Float = 0.5
+        public var minDegradeScale: Float = 0.4
 
         public init() {}
     }
@@ -153,10 +157,25 @@ public struct Augmenter {
         return out
     }
 
-    /// Color jitter and noise on a digit strip (no bars or cutouts: the field must stay readable).
+    /// Resolution loss, color jitter and noise on a digit strip (no bars or cutouts: the field must stay readable).
     public mutating func augment(_ strip: DigitStrip) -> DigitStrip {
         var p = strip.pixels
         let ch = DigitStrip.channels
+        if unit() < options.degradeProbability {
+            let scale = uniform(options.minDegradeScale...1.0)
+            let smallW = max(8, Int((Float(DigitStrip.width) * scale).rounded()))
+            let smallH = max(4, Int((Float(DigitStrip.height) * scale).rounded()))
+            let small = Resampler.resample(
+                rgb: p, width: DigitStrip.width, height: DigitStrip.height, channels: ch,
+                cropX: 0, cropY: 0, cropWidth: Float(DigitStrip.width), cropHeight: Float(DigitStrip.height),
+                outWidth: smallW, outHeight: smallH
+            )
+            p = Resampler.resample(
+                rgb: small, width: smallW, height: smallH, channels: ch,
+                cropX: 0, cropY: 0, cropWidth: Float(smallW), cropHeight: Float(smallH),
+                outWidth: DigitStrip.width, outHeight: DigitStrip.height
+            )
+        }
         let brightness = uniform(-options.maxBrightnessShift...options.maxBrightnessShift)
         let contrast = uniform(options.contrastRange)
         var gain = [Float](repeating: 1.0, count: ch)

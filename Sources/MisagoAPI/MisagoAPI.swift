@@ -66,7 +66,6 @@ struct MisagoAPI {
         let classifier = try ImageClassifier(weights: try HawkWeights.load(from: URL(fileURLWithPath: weightsPath)), threshold: threshold)
         let digits = try DigitReader(weights: try DigitReaderWeights.load(from: URL(fileURLWithPath: digitWeightsPath)))
         let regions = try RegionTable.load(from: URL(fileURLWithPath: regionsPath))
-        let reader = ScreenReader(classifier: classifier, digitReader: digits, regions: regions)
         app.logger.info("models loaded: classes \(classifier.classes.names.joined(separator: ", ")), regions \(regions.regions.keys.sorted().joined(separator: ", "))")
 
         if FileManager.default.fileExists(atPath: publicDirectory) {

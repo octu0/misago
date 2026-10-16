@@ -43,6 +43,7 @@ public enum ConvStem {
         let cols = ConvStemWeights.outputColumns
         var out = [Float](repeating: 0.0, count: cols * rows * oc)
         precondition(oc == 16, "stem kernel assumes 16 output channels")
+        FloatEnvironment.prepareForInference()
         pixels.withUnsafeBufferPointer { pp in
         w.weight.withUnsafeBufferPointer { wp in
         w.bias.withUnsafeBufferPointer { bp in

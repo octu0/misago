@@ -115,6 +115,7 @@ public final class HawkNetwork: @unchecked Sendable {
 
     /// Input projection, all layers and the final RMSNorm: [frames, modelDim].
     private func normedHidden(flatFeatures chunk: [Float], frames: Int) -> [Float] {
+        FloatEnvironment.prepareForInference()
         let w = weights
         let d = w.modelDim
         var x = [Float](repeating: 0.0, count: frames * d)
@@ -291,15 +292,18 @@ public final class HawkNetwork: @unchecked Sendable {
         }}}
     }
 
-    /// Sigmoid approximation of GeLU: x σ(1.702 x).
+    /// Sigmoid approximation of GeLU: x σ(1.702 x). Below −20 the value is under 1e-14 and is set to zero so
+    /// no denormals are produced.
     static func geluInPlace(_ x: inout [Float]) {
         let k = SIMD8<Float>(repeating: 1.702)
+        let cutoff = SIMD8<Float>(repeating: -20.0)
+        let zero = SIMD8<Float>(repeating: 0.0)
         x.withUnsafeMutableBufferPointer { p in
             let base = p.baseAddress!
             var i = 0
             while i + 8 <= p.count {
                 let v = load(base + i)
-                store(v * SIMDMath.sigmoid(k * v), base + i)
+                store((v * SIMDMath.sigmoid(k * v)).replacing(with: zero, where: v .< cutoff), base + i)
                 i += 8
             }
             while i < p.count {

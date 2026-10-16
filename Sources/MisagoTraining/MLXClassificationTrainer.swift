@@ -24,7 +24,7 @@ public final class MLXClassificationTrainer: @unchecked Sendable {
         self.network = network
         self.optimizer = ArrayLRAdam(learningRate: learningRate)
         self.clipNorm = clipNorm
-        MLX.GPU.set(cacheLimit: Self.cacheLimitBytes)
+        MLX.Memory.cacheLimit = Self.cacheLimitBytes
     }
 
     public func updateLearningRate(_ lr: Float) {

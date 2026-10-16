@@ -13,11 +13,23 @@ var dependencies: [Package.Dependency] = [
     .package(url: "https://github.com/vapor/vapor.git", from: "4.99.0")
 ]
 var targets: [Target] = [
+    // Floating-point mode helper (sets flush-to-zero on x86-64; a few lines of C, no dependencies).
+    .target(name: "CFloatEnv", path: "Sources/CFloatEnv"),
     // Inference library: Foundation only, no Apple frameworks.
-    .target(name: "Misago", path: "Sources/Misago"),
-    // stb_image (public domain) for decoding uploads without ImageIO.
+    .target(name: "Misago", dependencies: ["CFloatEnv"], path: "Sources/Misago"),
+    // stb_image (public domain) decodes uploads everywhere; on Linux the SIMD system libraries take JPEG and PNG.
     .target(name: "CStbImage", path: "Sources/CStbImage"),
-    .target(name: "ImageDecoding", dependencies: ["CStbImage"], path: "Sources/ImageDecoding"),
+    .systemLibrary(name: "CTurboJPEG", path: "Sources/CTurboJPEG", pkgConfig: "libturbojpeg", providers: [.apt(["libturbojpeg0-dev"])]),
+    .systemLibrary(name: "CLibPNG", path: "Sources/CLibPNG", pkgConfig: "libpng", providers: [.apt(["libpng-dev"])]),
+    .target(
+        name: "ImageDecoding",
+        dependencies: [
+            "CStbImage",
+            .target(name: "CTurboJPEG", condition: .when(platforms: [.linux])),
+            .target(name: "CLibPNG", condition: .when(platforms: [.linux]))
+        ],
+        path: "Sources/ImageDecoding"
+    ),
     // HTTP API and static page server (Vapor).
     .executableTarget(
         name: "MisagoAPI",

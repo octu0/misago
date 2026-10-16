@@ -38,10 +38,15 @@ public struct BytePixels: PixelSource {
     public func fill(_ buffer: UnsafeMutablePointer<Float>, from index: Int, count: Int) {
         data.withUnsafeBufferPointer { p in
             let src = p.baseAddress! + index
-            let scale: Float = 1.0 / 255.0
+            let scale = SIMD8<Float>(repeating: 1.0 / 255.0)
             var i = 0
+            while i + 8 <= count {
+                let bytes = UnsafeRawPointer(src + i).loadUnaligned(as: SIMD8<UInt8>.self)
+                UnsafeMutableRawPointer(buffer + i).storeBytes(of: SIMD8<Float>(bytes) * scale, as: SIMD8<Float>.self)
+                i += 8
+            }
             while i < count {
-                buffer[i] = Float(src[i]) * scale
+                buffer[i] = Float(src[i]) * (1.0 / 255.0)
                 i += 1
             }
         }
@@ -117,8 +122,10 @@ public enum Resampler {
     }
 
     /// Shrinking: each output pixel is the mean of the input rectangle it covers, with partial pixels weighted
-    /// by their overlap. Area outside the input is black and still counts toward the mean. Done in two passes
-    /// (rows, then columns) so every input sample is read once.
+    /// by their overlap. Area outside the input is black and still counts toward the mean.
+    ///
+    /// Two passes, vertical first: every input row is converted to floats once and added (SIMD, contiguous)
+    /// into the one or two output rows it overlaps; the horizontal pass then runs on just `outHeight` rows.
     private static func areaAverage<S: PixelSource>(
         rgb: S, width: Int, height: Int, channels ch: Int,
         originX: Float, originY: Float, scaleX: Float, scaleY: Float,
@@ -127,74 +134,84 @@ public enum Resampler {
     ) {
         let xs = axisWeights(origin: originX, scale: scaleX, outCount: outW, inCount: width)
         let ys = axisWeights(origin: originY, scale: scaleY, outCount: outH, inCount: height)
-        // Input rows that any output row touches.
-        var rowUsed = [Bool](repeating: false, count: height)
-        for iy in ys.indices {
-            rowUsed[iy] = true
+        // Invert the vertical weights: for each input row, the output rows it contributes to.
+        var rowTargets = [[(row: Int, weight: Float)]](repeating: [], count: height)
+        var oy = 0
+        while oy < outH {
+            var k = ys.starts[oy]
+            while k < ys.starts[oy + 1] {
+                rowTargets[ys.indices[k]].append((oy, ys.weights[k]))
+                k += 1
+            }
+            oy += 1
         }
-        // Pass 1: horizontal sums per input row, [height, outW, ch] (only rows that are used). Each input row
-        // is converted to floats once and then read through raw pointers.
-        var horizontal = [Float](repeating: 0.0, count: height * outW * ch)
-        var rowBuffer = [Float](repeating: 0.0, count: width * ch)
-        horizontal.withUnsafeMutableBufferPointer { hp in
+        let rowLen = width * ch
+        // Pass 1: vertical sums [outH, width, ch].
+        var vertical = [Float](repeating: 0.0, count: outH * rowLen)
+        var rowBuffer = [Float](repeating: 0.0, count: rowLen)
+        vertical.withUnsafeMutableBufferPointer { vp in
         rowBuffer.withUnsafeMutableBufferPointer { rp in
-        xs.starts.withUnsafeBufferPointer { sp in
-        xs.indices.withUnsafeBufferPointer { ip in
-        xs.weights.withUnsafeBufferPointer { wp in
-            let h = hp.baseAddress!
+            let v = vp.baseAddress!
             let row = rp.baseAddress!
-            let starts = sp.baseAddress!
-            let indices = ip.baseAddress!
-            let weights = wp.baseAddress!
             var iy = 0
             while iy < height {
-                if rowUsed[iy] {
-                    rgb.fill(row, from: iy * width * ch, count: width * ch)
-                    let dst = h + iy * outW * ch
-                    var ox = 0
-                    while ox < outW {
-                        let kEnd = starts[ox + 1]
-                        var c = 0
-                        while c < ch {
-                            var acc: Float = 0.0
-                            var k = starts[ox]
-                            while k < kEnd {
-                                acc += row[indices[k] * ch + c] * weights[k]
-                                k += 1
-                            }
-                            dst[ox * ch + c] = acc
-                            c += 1
+                let targets = rowTargets[iy]
+                if targets.isEmpty != true {
+                    rgb.fill(row, from: iy * rowLen, count: rowLen)
+                    for target in targets {
+                        let dst = v + target.row * rowLen
+                        let w = SIMD8<Float>(repeating: target.weight)
+                        var i = 0
+                        while i + 8 <= rowLen {
+                            let acc = UnsafeRawPointer(dst + i).loadUnaligned(as: SIMD8<Float>.self)
+                            let src = UnsafeRawPointer(row + i).loadUnaligned(as: SIMD8<Float>.self)
+                            UnsafeMutableRawPointer(dst + i).storeBytes(of: acc.addingProduct(src, w), as: SIMD8<Float>.self)
+                            i += 8
                         }
-                        ox += 1
+                        while i < rowLen {
+                            dst[i] += row[i] * target.weight
+                            i += 1
+                        }
                     }
                 }
                 iy += 1
             }
-        }}}}}
-        // Pass 2: vertical sums over the horizontal sums.
+        }}
+        // Pass 2: horizontal sums over the vertical rows, then scale by the cell area.
         let inv = 1.0 / (scaleX * scaleY)
-        var oy = 0
-        while oy < outH {
-            var k = ys.starts[oy]
-            let kEnd = ys.starts[oy + 1]
-            let dstBase = oy * outW * ch
-            while k < kEnd {
-                let srcBase = ys.indices[k] * outW * ch
-                let w = ys.weights[k]
-                var i = 0
-                while i < outW * ch {
-                    out[dstBase + i] += horizontal[srcBase + i] * w
-                    i += 1
+        vertical.withUnsafeBufferPointer { vp in
+        out.withUnsafeMutableBufferPointer { op in
+        xs.starts.withUnsafeBufferPointer { sp in
+        xs.indices.withUnsafeBufferPointer { ip in
+        xs.weights.withUnsafeBufferPointer { wp in
+            let v = vp.baseAddress!
+            let o = op.baseAddress!
+            let starts = sp.baseAddress!
+            let indices = ip.baseAddress!
+            let weights = wp.baseAddress!
+            var oy = 0
+            while oy < outH {
+                let src = v + oy * rowLen
+                let dst = o + oy * outW * ch
+                var ox = 0
+                while ox < outW {
+                    let kEnd = starts[ox + 1]
+                    var c = 0
+                    while c < ch {
+                        var acc: Float = 0.0
+                        var k = starts[ox]
+                        while k < kEnd {
+                            acc += src[indices[k] * ch + c] * weights[k]
+                            k += 1
+                        }
+                        dst[ox * ch + c] = clamp01(acc * inv)
+                        c += 1
+                    }
+                    ox += 1
                 }
-                k += 1
+                oy += 1
             }
-            var i = 0
-            while i < outW * ch {
-                out[dstBase + i] = clamp01(out[dstBase + i] * inv)
-                i += 1
-            }
-            oy += 1
-        }
+        }}}}}
     }
 
     /// Enlarging (or mixed): bilinear interpolation at each output pixel center. An output pixel whose center

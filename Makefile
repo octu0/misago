@@ -3,7 +3,11 @@ SCHEME_TRAIN := train
 SCHEME_TRAIN_DIGITS := train-digits
 DESTINATION := platform=macOS
 CONFIG := Release
-PRODUCTS = $$(xcodebuild -scheme $(SCHEME_TRAIN) -destination '$(DESTINATION)' -configuration $(CONFIG) -showBuildSettings 2>/dev/null | awk '/ BUILT_PRODUCTS_DIR =/{print $$3; exit}')
+# xcodebuild output goes under .build so the products have a known path (the SwiftPM-generated schemes do not
+# report BUILT_PRODUCTS_DIR through -showBuildSettings).
+DERIVED := .build/xcode
+XCODEBUILD := xcodebuild -destination '$(DESTINATION)' -configuration $(CONFIG) -derivedDataPath $(DERIVED)
+PRODUCTS := $(DERIVED)/Build/Products/$(CONFIG)
 
 TRAIN ?= .tmp/datasets/train.msgo
 EVAL ?= .tmp/datasets/eval.msgo
@@ -23,13 +27,13 @@ all: build test
 
 # MLX's Metal shaders are only built by Xcode, so everything that touches MLX goes through xcodebuild.
 build:
-	xcodebuild build -scheme $(SCHEME_PKG) -destination '$(DESTINATION)' -configuration $(CONFIG)
+	$(XCODEBUILD) build -scheme $(SCHEME_PKG)
 
 build-train:
-	xcodebuild build -scheme $(SCHEME_TRAIN) -destination '$(DESTINATION)' -configuration $(CONFIG)
+	$(XCODEBUILD) build -scheme $(SCHEME_TRAIN)
 
 test:
-	xcodebuild test -scheme $(SCHEME_PKG) -destination '$(DESTINATION)' -configuration $(CONFIG) ENABLE_TESTABILITY=YES
+	$(XCODEBUILD) test -scheme $(SCHEME_PKG) ENABLE_TESTABILITY=YES
 
 train: build-train
 	$(PRODUCTS)/train --train $(TRAIN) --eval $(EVAL) -e $(EPOCHS) --export-weights $(WEIGHTS) $(ARGS)
@@ -38,7 +42,7 @@ eval: build-train
 	$(PRODUCTS)/train --train $(TRAIN) --eval $(EVAL) -e 0 --import-weights $(WEIGHTS) $(ARGS)
 
 build-train-digits:
-	xcodebuild build -scheme $(SCHEME_TRAIN_DIGITS) -destination '$(DESTINATION)' -configuration $(CONFIG)
+	$(XCODEBUILD) build -scheme $(SCHEME_TRAIN_DIGITS)
 
 # DIGIT_TRAIN may list several datasets (synthetic and real); each becomes a --train argument.
 train-digits: build-train-digits
@@ -77,7 +81,7 @@ docker:
 	docker build -t $(IMAGE) .
 
 clean:
-	xcodebuild clean -scheme $(SCHEME_PKG) -destination '$(DESTINATION)' -configuration $(CONFIG)
+	$(XCODEBUILD) clean -scheme $(SCHEME_PKG)
 	swift package clean
 
 help:

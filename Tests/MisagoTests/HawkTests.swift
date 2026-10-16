@@ -9,7 +9,6 @@ final class HawkTests: XCTestCase {
     override func setUpWithError() throws {
         try super.setUpWithError()
         try MLXTestEnvironment.skipIfMetallibUnavailable()
-        Device.setDefault(device: .gpu)
         MLXRandom.seed(7)
     }
 
