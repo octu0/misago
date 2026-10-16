@@ -6,6 +6,11 @@ public struct ScreenReading: Sendable, Equatable {
     /// The number read from the class's field, or nil when the class has no field or nothing was read.
     public let reading: DigitReading?
 
+    public init(verdict: ImageVerdict, reading: DigitReading?) {
+        self.verdict = verdict
+        self.reading = reading
+    }
+
     /// The number for callers that want a single integer: −1 when the screen is not recognized or no number was read.
     public var number: Int {
         return reading?.value ?? -1

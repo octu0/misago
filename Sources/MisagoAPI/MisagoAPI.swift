@@ -18,6 +18,8 @@ struct ReadResponse: Content {
     let digits: String?
     let confidence: Float?
     let ms: Double
+    /// Server-side stage times: decode, normalize (whole-screen downscale), classify, extract (crop), read (digits).
+    let timings_ms: [String: Double]
     let width: Int
     let height: Int
 }
@@ -87,15 +89,41 @@ struct MisagoAPI {
             } else {
                 throw Abort(.badRequest, reason: "send the image as multipart field `image` or as the request body")
             }
+            func now() -> Double {
+                return Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000.0
+            }
+            func round2(_ v: Double) -> Double {
+                return (v * 100).rounded() / 100
+            }
+            let decodeStart = now()
             let decoded: (width: Int, height: Int, rgb: [UInt8])
             do {
                 decoded = try ImageDecoder.decodeRGB(bytes)
             } catch {
                 throw Abort(.unprocessableEntity, reason: "cannot decode image: \(error)")
             }
-            let start = DispatchTime.now().uptimeNanoseconds
-            let result = try reader.read(width: decoded.width, height: decoded.height, rgb: decoded.rgb)
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000.0
+            let decodeMs = now() - decodeStart
+            // The stages are run separately here (same work as `ScreenReader.read`) so each can be timed.
+            let start = now()
+            let image = try ScreenNormalizer.normalize(width: decoded.width, height: decoded.height, rgb: decoded.rgb)
+            let normalizeMs = now() - start
+            let classifyStart = now()
+            let verdict = classifier.classify(image)
+            let classifyMs = now() - classifyStart
+            var extractMs = 0.0
+            var readMs = 0.0
+            var reading: DigitReading? = nil
+            if verdict.isOther != true, let region = regions.regions[verdict.className] {
+                let extractStart = now()
+                let strip = try StripNormalizer.extract(width: decoded.width, height: decoded.height, rgb: decoded.rgb, region: region)
+                extractMs = now() - extractStart
+                let readStart = now()
+                reading = digits.read(strip)
+                readMs = now() - readStart
+            }
+            let result = ScreenReading(verdict: verdict, reading: reading)
+            let ms = now() - start
+            req.logger.info("read \(result.verdict.className) number=\(result.number) decode=\(round2(decodeMs))ms total=\(round2(ms))ms (normalize \(round2(normalizeMs)), classify \(round2(classifyMs)), extract \(round2(extractMs)), read \(round2(readMs)))")
             var probabilities: [String: Float] = [:]
             var c = 0
             while c < result.verdict.probabilities.count {
@@ -109,7 +137,8 @@ struct MisagoAPI {
                 number: result.number,
                 digits: result.reading?.digits,
                 confidence: result.reading?.confidence,
-                ms: (ms * 100).rounded() / 100,
+                ms: round2(ms),
+                timings_ms: ["decode": round2(decodeMs), "normalize": round2(normalizeMs), "classify": round2(classifyMs), "extract": round2(extractMs), "read": round2(readMs)],
                 width: decoded.width,
                 height: decoded.height
             )

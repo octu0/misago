@@ -58,20 +58,26 @@ public final class HawkNetwork: @unchecked Sendable {
         let normed = normedHidden(flatFeatures: chunk, frames: frames)
         // Mean of the normed frames, then one projection: logits are linear in the normed vector.
         var pooled = [Float](repeating: 0.0, count: d)
-        var f = 0
-        while f < frames {
-            var c = 0
-            while c < d {
-                pooled[c] += normed[f * d + c]
-                c += 1
+        normed.withUnsafeBufferPointer { np in
+            pooled.withUnsafeMutableBufferPointer { pp in
+                let n = np.baseAddress!
+                let p = pp.baseAddress!
+                var f = 0
+                while f < frames {
+                    var c = 0
+                    while c < d {
+                        Self.store(Self.load(p + c) + Self.load(n + f * d + c), p + c)
+                        c += 8
+                    }
+                    f += 1
+                }
+                let inv = SIMD8<Float>(repeating: 1.0 / Float(frames))
+                var c = 0
+                while c < d {
+                    Self.store(Self.load(p + c) * inv, p + c)
+                    c += 8
+                }
             }
-            f += 1
-        }
-        let inv = 1.0 / Float(frames)
-        var c = 0
-        while c < d {
-            pooled[c] *= inv
-            c += 1
         }
         var out = w.bOut
         Self.gemm(pooled, w.wOut, &out, m: 1, n: w.outputDim, k: d, beta: 1.0)
@@ -112,14 +118,14 @@ public final class HawkNetwork: @unchecked Sendable {
         let w = weights
         let d = w.modelDim
         var x = [Float](repeating: 0.0, count: frames * d)
-        var f = 0
-        while f < frames {
-            var c = 0
-            while c < d {
-                x[f * d + c] = w.bIn[c]
-                c += 1
+        x.withUnsafeMutableBufferPointer { xp in
+            w.bIn.withUnsafeBufferPointer { bp in
+                var f = 0
+                while f < frames {
+                    (xp.baseAddress! + f * d).update(from: bp.baseAddress!, count: d)
+                    f += 1
+                }
             }
-            f += 1
         }
         Self.gemm(chunk, w.wIn, &x, m: frames, n: d, k: w.inputDim, beta: 1.0)
         var l = 0
@@ -255,24 +261,34 @@ public final class HawkNetwork: @unchecked Sendable {
         Matrix.gemm(a, lda, b, ldb, c, ldc, m: m, n: n, k: k, beta: beta)
     }
 
+    /// RMSNorm per frame; `width` is a multiple of 8.
     static func rmsNorm(_ x: [Float], _ gain: [Float], _ out: inout [Float], frames: Int, width: Int) {
-        var f = 0
-        while f < frames {
-            let base = f * width
-            var sumSq: Float = 0.0
-            var c = 0
-            while c < width {
-                sumSq += x[base + c] * x[base + c]
-                c += 1
+        x.withUnsafeBufferPointer { xp in
+        gain.withUnsafeBufferPointer { gp in
+        out.withUnsafeMutableBufferPointer { op in
+            let xb = xp.baseAddress!
+            let g = gp.baseAddress!
+            let o = op.baseAddress!
+            var f = 0
+            while f < frames {
+                let row = xb + f * width
+                var acc = SIMD8<Float>(repeating: 0.0)
+                var c = 0
+                while c < width {
+                    let v = load(row + c)
+                    acc = acc.addingProduct(v, v)
+                    c += 8
+                }
+                let scale = SIMD8<Float>(repeating: 1.0 / sqrtf(acc.sum() / Float(width) + HawkWeights.rmsNormEpsilon))
+                let dst = o + f * width
+                c = 0
+                while c < width {
+                    store(load(row + c) * scale * load(g + c), dst + c)
+                    c += 8
+                }
+                f += 1
             }
-            let scale = 1.0 / sqrtf(sumSq / Float(width) + HawkWeights.rmsNormEpsilon)
-            c = 0
-            while c < width {
-                out[base + c] = x[base + c] * scale * gain[c]
-                c += 1
-            }
-            f += 1
-        }
+        }}}
     }
 
     /// Sigmoid approximation of GeLU: x σ(1.702 x).
@@ -309,10 +325,21 @@ public final class HawkNetwork: @unchecked Sendable {
     }
 
     static func multiplyInPlace(_ x: inout [Float], _ y: [Float]) {
-        var i = 0
-        while i < x.count {
-            x[i] *= y[i]
-            i += 1
+        let n = min(x.count, y.count)
+        x.withUnsafeMutableBufferPointer { xp in
+            y.withUnsafeBufferPointer { yp in
+                let a = xp.baseAddress!
+                let b = yp.baseAddress!
+                var i = 0
+                while i + 8 <= n {
+                    store(load(a + i) * load(b + i), a + i)
+                    i += 8
+                }
+                while i < n {
+                    a[i] *= b[i]
+                    i += 1
+                }
+            }
         }
     }
 
