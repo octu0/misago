@@ -27,6 +27,7 @@ var trainPath = ""
 var evalPath = ""
 var exportWeightsPath: String? = nil
 var importWeightsPath: String? = nil
+var evalDumpPath = ""
 var seed: UInt64 = 7
 
 var argIdx = 1
@@ -51,6 +52,7 @@ while argIdx < args.count {
         print("  --seed <Int>               Random seed (default: 7)")
         print("  --export-weights <path>    Output path for the trained weights (JSON)")
         print("  --import-weights <path>    Initial weights (eval only with -e 0)")
+        print("  --eval-dump <jsonl>        Write per-sample eval results (with source paths when <eval>.meta.json exists)")
         exit(0)
     case "--train":
         if let v = value() { trainPath = v }
@@ -66,6 +68,8 @@ while argIdx < args.count {
         if let v = value() { exportWeightsPath = v }
     case "--import-weights":
         if let v = value() { importWeightsPath = v }
+    case "--eval-dump":
+        if let v = value() { evalDumpPath = v }
     default:
         print("error: unknown argument \(arg)")
         exit(1)
@@ -150,53 +154,63 @@ func batch(_ reader: DatasetReader, _ indices: [Int]) -> (features: [[Float]], l
 
 struct EvalResult {
     let loss: Float
-    let accuracy: Float
     let logits: [[Float]]
     let labels: [Int]
-    let confusion: [[Int]]  // [label][predicted]
+
+    /// Accuracy and confusion matrix [label][predicted] under a calibration (identity = raw logits).
+    func summary(calibration: VectorCalibration) -> (accuracy: Float, confusion: [[Int]], probabilities: [[Float]]) {
+        var correct = 0
+        var confusion = [[Int]](repeating: [Int](repeating: 0, count: classes.count), count: classes.count)
+        var probabilities: [[Float]] = []
+        probabilities.reserveCapacity(logits.count)
+        var i = 0
+        while i < logits.count {
+            let probs = calibration.probabilities(logits[i])
+            var predicted = 0
+            var c = 1
+            while c < probs.count {
+                if probs[predicted] < probs[c] {
+                    predicted = c
+                }
+                c += 1
+            }
+            if predicted == labels[i] {
+                correct += 1
+            }
+            confusion[labels[i]][predicted] += 1
+            probabilities.append(probs)
+            i += 1
+        }
+        return (Float(correct) / Float(max(1, logits.count)), confusion, probabilities)
+    }
 }
 
 @MainActor func evaluate(_ trainer: MLXClassificationTrainer, _ reader: DatasetReader) -> EvalResult {
     let logits = allLogits(trainer, reader)
     let labels = reader.labels
     var lossSum: Float = 0.0
-    var correct = 0
-    var confusion = [[Int]](repeating: [Int](repeating: 0, count: classes.count), count: classes.count)
     var i = 0
     while i < logits.count {
-        let lp = HawkNetwork.logSoftmax(logits[i])
-        lossSum -= lp[labels[i]]
-        var predicted = 0
-        var c = 1
-        while c < logits[i].count {
-            if logits[i][predicted] < logits[i][c] {
-                predicted = c
-            }
-            c += 1
-        }
-        if predicted == labels[i] {
-            correct += 1
-        }
-        confusion[labels[i]][predicted] += 1
+        lossSum -= HawkNetwork.logSoftmax(logits[i])[labels[i]]
         i += 1
     }
-    let n = max(1, logits.count)
-    return EvalResult(loss: lossSum / Float(n), accuracy: Float(correct) / Float(n), logits: logits, labels: labels, confusion: confusion)
+    return EvalResult(loss: lossSum / Float(max(1, logits.count)), logits: logits, labels: labels)
 }
 
+/// Accuracy, confusion and ECE, all judged on the calibrated probabilities (the same rule `classify` uses).
 func report(_ name: String, _ r: EvalResult, calibration: VectorCalibration) {
-    print("  \(name): loss \(String(format: "%.4f", r.loss)), accuracy \(String(format: "%.2f", r.accuracy * 100))% (\(r.logits.count) samples)")
+    let s = r.summary(calibration: calibration)
+    print("  \(name): loss \(String(format: "%.4f", r.loss)), accuracy \(String(format: "%.2f", s.accuracy * 100))% (\(r.logits.count) samples, calibrated)")
     print("    confusion [label -> predicted]:")
     var a = 0
     while a < classes.count {
-        let row = r.confusion[a].enumerated().map { "\(classes[$0.offset]) \($0.element)" }.joined(separator: ", ")
+        let row = s.confusion[a].enumerated().map { "\(classes[$0.offset]) \($0.element)" }.joined(separator: ", ")
         print("      \(classes[a]) -> \(row)")
         a += 1
     }
-    let probs = r.logits.map { calibration.probabilities($0) }
-    let ece = VectorCalibration.expectedCalibrationError(probabilities: probs, labels: r.labels)
+    let ece = VectorCalibration.expectedCalibrationError(probabilities: s.probabilities, labels: r.labels)
     let bias = calibration.bias.map { String(format: "%.3f", $0) }.joined(separator: ", ")
-    print("    calibrated ECE \(String(format: "%.4f", ece.ece)) (scale \(String(format: "%.3f", calibration.scale)), bias [\(bias)])")
+    print("    ECE \(String(format: "%.4f", ece.ece)) (scale \(String(format: "%.3f", calibration.scale)), bias [\(bias)])")
 }
 
 MLXRandom.seed(seed)
@@ -249,7 +263,8 @@ if 0 < epochs {
         var selectionLoss = trainLoss
         if let evalSet = evalSet {
             let r = evaluate(trainer, evalSet)
-            line += ", eval loss \(String(format: "%.4f", r.loss)), eval accuracy \(String(format: "%.2f", r.accuracy * 100))%"
+            let accuracy = r.summary(calibration: .identity(classCount: classes.count)).accuracy
+            line += ", eval loss \(String(format: "%.4f", r.loss)), eval accuracy \(String(format: "%.2f", accuracy * 100))%"
             selectionLoss = r.loss
         }
         line += " (\(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - epStart)) s, grad norm \(String(format: "%.2f", trainer.lastGradientNorm)))"
@@ -275,6 +290,48 @@ if let evalSet = evalSet {
         print("  calibration fitted on eval: scale \(String(format: "%.3f", calibration.scale))")
     }
     report("eval", r, calibration: calibration)
+    if evalDumpPath.isEmpty != true {
+        var paths: [String] = []
+        if let metaData = try? Data(contentsOf: URL(fileURLWithPath: evalPath + ".meta.json")),
+           let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any],
+           let samples = meta["samples"] as? [[String: Any]] {
+            paths = samples.map { ($0["path"] as? String) ?? "" }
+        }
+        var lines: [String] = []
+        let s = r.summary(calibration: calibration)
+        var i = 0
+        while i < r.logits.count {
+            let probs = s.probabilities[i]
+            var predicted = 0
+            var c = 1
+            while c < probs.count {
+                if probs[predicted] < probs[c] {
+                    predicted = c
+                }
+                c += 1
+            }
+            var row: [String: Any] = [
+                "index": i,
+                "label": classes[r.labels[i]],
+                "predicted": classes[predicted],
+                "correct": predicted == r.labels[i],
+                "probabilities": probs.map { Double(String(format: "%.4f", $0)) ?? 0.0 }
+            ]
+            if i < paths.count {
+                row["path"] = paths[i]
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]), let text = String(data: data, encoding: .utf8) {
+                lines.append(text)
+            }
+            i += 1
+        }
+        do {
+            try (lines.joined(separator: "\n") + "\n").write(toFile: evalDumpPath, atomically: true, encoding: .utf8)
+            print("  eval dump: \(evalDumpPath)")
+        } catch {
+            print("error: cannot write \(evalDumpPath): \(error)")
+        }
+    }
 }
 let trainResult = evaluate(trainer, trainSet)
 report("train", trainResult, calibration: calibration)

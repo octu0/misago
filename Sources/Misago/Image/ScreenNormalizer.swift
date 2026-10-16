@@ -24,6 +24,37 @@ public enum ScreenNormalizer {
         return resample(width: width, height: height, rgb: values)
     }
 
+    /// Normalizes a sub-rectangle of the input (in input pixels, clipped to the image).
+    public static func normalize(width: Int, height: Int, rgb: [UInt8], cropX: Int, cropY: Int, cropWidth: Int, cropHeight: Int) throws -> ScreenImage {
+        if width <= 0 || height <= 0 {
+            throw ScreenImageError.invalidSize(width: width, height: height)
+        }
+        let expected = width * height * ScreenImage.channels
+        if rgb.count != expected {
+            throw ScreenImageError.pixelCountMismatch(expected: expected, actual: rgb.count)
+        }
+        let x0 = min(max(0, cropX), width - 1)
+        let y0 = min(max(0, cropY), height - 1)
+        let x1 = min(width, max(x0 + 1, cropX + cropWidth))
+        let y1 = min(height, max(y0 + 1, cropY + cropHeight))
+        let cw = x1 - x0
+        let chh = y1 - y0
+        let ch = ScreenImage.channels
+        var values = [Float](repeating: 0.0, count: cw * chh * ch)
+        var y = 0
+        while y < chh {
+            let src = ((y0 + y) * width + x0) * ch
+            let dst = y * cw * ch
+            var i = 0
+            while i < cw * ch {
+                values[dst + i] = Float(rgb[src + i]) * (1.0 / 255.0)
+                i += 1
+            }
+            y += 1
+        }
+        return resample(width: cw, height: chh, rgb: values)
+    }
+
     /// Float variant, samples in [0, 1].
     public static func normalize(width: Int, height: Int, rgb: [Float]) throws -> ScreenImage {
         if width <= 0 || height <= 0 {

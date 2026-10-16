@@ -23,6 +23,7 @@ var trainPath = ""
 var evalPath = ""
 var evalFraction: Double = 0.1
 var numWorkers = 8
+var augmentCount = 0
 
 func parseClass(_ spec: String) -> ClassFolder? {
     guard let eq = spec.firstIndex(of: "=") else {
@@ -56,6 +57,7 @@ while argIdx < args.count {
         print("  --train <path>              Output dataset for training [required]")
         print("  --eval <path>               Output dataset for evaluation")
         print("  --eval-fraction <0-1>       Share of --class files sent to --eval when no --eval-class is given (default 0.1)")
+        print("  --augment <Int>             Augmented copies per training image (crop, color, bars, cutout, noise; default 0)")
         print("  -p, --parallel <Int>        Decoding threads (default 8)")
         exit(0)
     case "--class":
@@ -78,6 +80,8 @@ while argIdx < args.count {
         if let v = value(), let f = Double(v) { evalFraction = min(1.0, max(0.0, f)) }
     case "-p", "--parallel":
         if let v = value(), let n = Int(v) { numWorkers = max(1, n) }
+    case "--augment":
+        if let v = value(), let n = Int(v) { augmentCount = max(0, n) }
     default:
         print("error: unknown argument \(arg)")
         exit(1)
@@ -158,15 +162,26 @@ print("train: \(summary(trainItems))")
 print("eval:  \(summary(evalItems))")
 
 final class ResultBox: @unchecked Sendable {
-    var images: [ScreenImage?]
+    /// Per item: the original followed by its augmented copies.
+    var images: [[ScreenImage]]
     var failures: [String] = []
     let lock = NSLock()
     init(count: Int) {
-        images = [ScreenImage?](repeating: nil, count: count)
+        images = [[ScreenImage]](repeating: [], count: count)
     }
 }
 
-func write(items: [Item], to path: String, classes: ClassList, workers: Int) {
+/// Seed for the k-th augmentation of a file, stable across runs.
+func augmentationSeed(_ path: String, _ k: Int) -> UInt64 {
+    var hash: UInt64 = 0xcbf29ce484222325
+    for byte in (path as NSString).lastPathComponent.utf8 {
+        hash ^= UInt64(byte)
+        hash = hash &* 0x100000001b3
+    }
+    return hash &+ UInt64(k) &* 0x9E3779B97F4A7C15
+}
+
+func write(items: [Item], to path: String, classes: ClassList, workers: Int, augment: Int) {
     if items.isEmpty {
         return
     }
@@ -175,15 +190,29 @@ func write(items: [Item], to path: String, classes: ClassList, workers: Int) {
     DispatchQueue.concurrentPerform(iterations: max(1, min(workers, items.count))) { worker in
         var i = worker
         while i < paths.count {
-            let result: ScreenImage? = autoreleasepool {
-                guard let decoded = try? loadRGB(path: paths[i]) else {
-                    return nil
+            let result: [ScreenImage] = autoreleasepool {
+                guard let decoded = try? loadRGB(path: paths[i]),
+                      let original = try? ScreenNormalizer.normalize(width: decoded.width, height: decoded.height, rgb: decoded.rgb) else {
+                    return []
                 }
-                return try? ScreenNormalizer.normalize(width: decoded.width, height: decoded.height, rgb: decoded.rgb)
+                var out = [original]
+                var k = 0
+                while k < augment {
+                    var augmenter = Augmenter(seed: augmentationSeed(paths[i], k))
+                    let crop = augmenter.cropRect(width: decoded.width, height: decoded.height)
+                    if let cropped = try? ScreenNormalizer.normalize(
+                        width: decoded.width, height: decoded.height, rgb: decoded.rgb,
+                        cropX: crop.x, cropY: crop.y, cropWidth: crop.width, cropHeight: crop.height
+                    ) {
+                        out.append(augmenter.augment(cropped))
+                    }
+                    k += 1
+                }
+                return out
             }
             box.lock.lock()
             box.images[i] = result
-            if result == nil {
+            if result.isEmpty {
                 box.failures.append(paths[i])
             }
             box.lock.unlock()
@@ -196,13 +225,27 @@ func write(items: [Item], to path: String, classes: ClassList, workers: Int) {
         let writer = try DatasetWriter(url: url, classes: classes)
         var i = 0
         while i < items.count {
-            if let image = box.images[i] {
+            for image in box.images[i] {
                 try writer.append(DatasetSample(label: items[i].label, image: image))
             }
             i += 1
         }
         try writer.close()
-        print("wrote \(path): \(writer.writtenCount) samples")
+        print("wrote \(path): \(writer.writtenCount) samples (\(items.count) images, \(augment) augmented copies each)")
+        // Sidecar with the source path of every sample, in file order, for inspecting evaluation results.
+        var meta: [[String: Any]] = []
+        i = 0
+        while i < items.count {
+            var k = 0
+            while k < box.images[i].count {
+                meta.append(["path": items[i].path, "label": items[i].label, "augmented": k])
+                k += 1
+            }
+            i += 1
+        }
+        let metaObject: [String: Any] = ["classes": classes.names, "samples": meta]
+        let metaData = try JSONSerialization.data(withJSONObject: metaObject, options: [.prettyPrinted, .sortedKeys])
+        try metaData.write(to: URL(fileURLWithPath: path + ".meta.json"))
     } catch {
         print("error: cannot write \(path): \(error)")
         exit(1)
@@ -213,8 +256,8 @@ func write(items: [Item], to path: String, classes: ClassList, workers: Int) {
 }
 
 let start = CFAbsoluteTimeGetCurrent()
-write(items: trainItems, to: trainPath, classes: classes, workers: numWorkers)
+write(items: trainItems, to: trainPath, classes: classes, workers: numWorkers, augment: augmentCount)
 if evalPath.isEmpty != true {
-    write(items: evalItems, to: evalPath, classes: classes, workers: numWorkers)
+    write(items: evalItems, to: evalPath, classes: classes, workers: numWorkers, augment: 0)
 }
 print("done (\(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - start)) s)")
