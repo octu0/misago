@@ -2,9 +2,10 @@ import Foundation
 
 /// Turns an RGB bitmap of any size into a `ScreenImage`.
 ///
-/// The input is fitted into a 16:9 canvas with black bars (centered) so that nothing is cropped and the
-/// aspect ratio is kept, then resampled to 128 x 72: area averaging when shrinking, bilinear when enlarging.
-/// A 16:9 input fills the canvas exactly; letterboxed or pillarboxed inputs keep their bars.
+/// The whole input is resampled to 128 x 72 regardless of its aspect ratio (area averaging when shrinking,
+/// bilinear when enlarging). Game HUDs are anchored to the screen edges, so stretching a 4:3 tablet or a
+/// 19.5:9 phone screenshot puts the same elements in the same places, and no device adds black bars that the
+/// classifier would have to learn to ignore.
 public enum ScreenNormalizer {
     /// `rgb` is interleaved RGB, row-major, `width * height * 3` samples (0...255), row 0 at the top.
     public static func normalize(width: Int, height: Int, rgb: [UInt8]) throws -> ScreenImage {
@@ -49,22 +50,11 @@ public enum ScreenNormalizer {
         }
     }
 
-    /// Canvas: the smallest 16:9 rectangle (in input pixels) containing the crop, centered on it. The crop here
-    /// is always the whole source image, so everything outside it is black by construction.
+    /// Resamples the crop (here always the whole source image) onto the 128 x 72 grid.
     private static func fit<S: PixelSource>(width: Int, height: Int, source: S, cropX: Int, cropY: Int, cropWidth: Int, cropHeight: Int) -> ScreenImage {
-        let targetAspect = Float(ScreenImage.width) / Float(ScreenImage.height)
-        var canvasW = Float(cropWidth)
-        var canvasH = Float(cropHeight)
-        if canvasW / canvasH < targetAspect {
-            canvasW = canvasH * targetAspect
-        } else {
-            canvasH = canvasW / targetAspect
-        }
-        let originX = Float(cropX) + (Float(cropWidth) - canvasW) * 0.5
-        let originY = Float(cropY) + (Float(cropHeight) - canvasH) * 0.5
         let out = Resampler.resample(
             source: source, width: width, height: height, channels: ScreenImage.channels,
-            cropX: originX, cropY: originY, cropWidth: canvasW, cropHeight: canvasH,
+            cropX: Float(cropX), cropY: Float(cropY), cropWidth: Float(cropWidth), cropHeight: Float(cropHeight),
             outWidth: ScreenImage.width, outHeight: ScreenImage.height
         )
         return (try? ScreenImage(pixels: out)) ?? ScreenImage()

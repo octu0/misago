@@ -32,15 +32,28 @@ final class ScreenNormalizerTests: XCTestCase {
         XCTAssertEqual(image.pixels[ScreenImage.pixelCount - 1], 30.0 / 255.0, accuracy: 1e-5)
     }
 
-    /// A 4:3 input gets black bars on the left and right; the middle keeps its color.
-    func testPillarboxForNarrowInput() throws {
-        let image = try ScreenNormalizer.normalize(width: 800, height: 600, rgb: solid(width: 800, height: 600, r: 255, g: 255, b: 255))
-        // Canvas is 800x600 -> 16:9 canvas 1066.7x600, so 12.5% on each side is black: columns 0..<16 and 112..<128.
+    /// A 4:3 input is stretched over the whole grid: no bars, and horizontal positions scale with the width.
+    func testNarrowInputIsStretchedWithoutBars() throws {
+        var rgb = solid(width: 800, height: 600, r: 255, g: 255, b: 255)
+        // Black left quarter.
+        var y = 0
+        while y < 600 {
+            var x = 0
+            while x < 200 {
+                let i = (y * 800 + x) * 3
+                rgb[i] = 0
+                rgb[i + 1] = 0
+                rgb[i + 2] = 0
+                x += 1
+            }
+            y += 1
+        }
+        let image = try ScreenNormalizer.normalize(width: 800, height: 600, rgb: rgb)
         let midRow = ScreenImage.height / 2
         XCTAssertEqual(image.pixels[(midRow * ScreenImage.width + 0) * 3], 0.0, accuracy: 1e-5)
-        XCTAssertEqual(image.pixels[(midRow * ScreenImage.width + 64) * 3], 1.0, accuracy: 1e-5)
-        XCTAssertEqual(image.pixels[(midRow * ScreenImage.width + 127) * 3], 0.0, accuracy: 1e-5)
-        XCTAssertEqual(image.pixels[(midRow * ScreenImage.width + 20) * 3], 1.0, accuracy: 1e-5)
+        XCTAssertEqual(image.pixels[(midRow * ScreenImage.width + 30) * 3], 0.0, accuracy: 1e-5)   // still inside the left quarter (32 columns)
+        XCTAssertEqual(image.pixels[(midRow * ScreenImage.width + 34) * 3], 1.0, accuracy: 1e-5)
+        XCTAssertEqual(image.pixels[(midRow * ScreenImage.width + 127) * 3], 1.0, accuracy: 1e-5)  // no right bar
     }
 
     /// Row 0 of the input lands on row 0 of the output (top stays top).

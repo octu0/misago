@@ -234,7 +234,10 @@ if 0 < epochs {
     print("  learning rate \(Defaults.lrMax) -> \(Defaults.lrMin), steps \(totalSteps) (warmup \(warmupSteps)), grad clip \(Defaults.clipNorm)")
     var rng = SystemRandomNumberGenerator()
     var indices = Array(0..<trainSet.count)
-    var bestLoss = Float.greatestFiniteMagnitude
+    // Selection: highest eval accuracy, ties broken by lower eval loss. Loss alone picks very early epochs
+    // when the frequent classes converge first and the rare, diverse ones are still underfit; calibration
+    // is fitted afterwards, so a somewhat larger loss costs nothing.
+    var bestScore: (accuracy: Float, loss: Float) = (-1.0, Float.greatestFiniteMagnitude)
     var bestEpoch = 0
     var globalStep = 0
     let trainStart = CFAbsoluteTimeGetCurrent()
@@ -260,16 +263,16 @@ if 0 < epochs {
         }
         let trainLoss = lossSum / Float(max(1, steps))
         var line = "epoch \(ep)/\(epochs): train loss \(String(format: "%.4f", trainLoss))"
-        var selectionLoss = trainLoss
+        var score: (accuracy: Float, loss: Float) = (0.0, trainLoss)
         if let evalSet = evalSet {
             let r = evaluate(trainer, evalSet)
             let accuracy = r.summary(calibration: .identity(classCount: classes.count)).accuracy
             line += ", eval loss \(String(format: "%.4f", r.loss)), eval accuracy \(String(format: "%.2f", accuracy * 100))%"
-            selectionLoss = r.loss
+            score = (accuracy, r.loss)
         }
         line += " (\(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - epStart)) s, grad norm \(String(format: "%.2f", trainer.lastGradientNorm)))"
-        if selectionLoss < bestLoss {
-            bestLoss = selectionLoss
+        if bestScore.accuracy < score.accuracy || (bestScore.accuracy == score.accuracy && score.loss < bestScore.loss) {
+            bestScore = score
             bestEpoch = ep
             bestWeights = mlxNetwork.exportWeights(classes: classes)
             line += " *"
@@ -277,7 +280,7 @@ if 0 < epochs {
         print(line)
         ep += 1
     }
-    print("  best epoch \(bestEpoch) (loss \(String(format: "%.4f", bestLoss))), \(String(format: "%.1f", (CFAbsoluteTimeGetCurrent() - trainStart) / 60.0)) min")
+    print("  best epoch \(bestEpoch) (accuracy \(String(format: "%.2f", bestScore.accuracy * 100))%, loss \(String(format: "%.4f", bestScore.loss))), \(String(format: "%.1f", (CFAbsoluteTimeGetCurrent() - trainStart) / 60.0)) min")
     mlxNetwork.importWeights(from: bestWeights)
 }
 
