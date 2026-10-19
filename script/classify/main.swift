@@ -4,10 +4,9 @@ import Misago
 setbuf(stdout, nil)
 
 // Classifies image files with trained weights.
-// Usage: classify --weights <model.json> [--threshold 0.5] <image>...
+// Usage: classify --weights <model.json> <image>...
 
 var weightsPath = ""
-var threshold: Float = 0.5
 var imagePaths: [String] = []
 var argIdx = 1
 let args = CommandLine.arguments
@@ -15,19 +14,12 @@ while argIdx < args.count {
     let arg = args[argIdx]
     switch arg {
     case "-h", "--help":
-        print("Usage: classify --weights <model.json> [--threshold 0.5] <image>...")
+        print("Usage: classify --weights <model.json> <image>...")
         exit(0)
     case "-w", "--weights":
         if (argIdx + 1) < args.count {
             argIdx += 1
             weightsPath = args[argIdx]
-        }
-    case "--threshold":
-        if (argIdx + 1) < args.count {
-            argIdx += 1
-            if let v = Float(args[argIdx]) {
-                threshold = v
-            }
         }
     default:
         if arg.hasPrefix("-") {
@@ -51,7 +43,7 @@ do {
 }
 let classifier: ImageClassifier
 do {
-    classifier = try ImageClassifier(weights: weights, threshold: threshold)
+    classifier = try ImageClassifier(weights: weights)
 } catch {
     print("error: invalid class list in weights: \(error)")
     exit(1)

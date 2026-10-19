@@ -8,7 +8,7 @@ import ImageDecoding
 /// (the upload page) are served from `MISAGO_PUBLIC`.
 ///
 /// Environment: MISAGO_WEIGHTS (classifier JSON), MISAGO_DIGIT_WEIGHTS (reader JSON), MISAGO_REGIONS
-/// (regions JSON), MISAGO_PUBLIC (static directory, default .tmp/public), MISAGO_THRESHOLD (default 0.5),
+/// (regions JSON), MISAGO_PUBLIC (static directory, default .tmp/public),
 /// PORT (default 8080, set by Cloud Run).
 struct ReadResponse: Content {
     let `class`: String
@@ -60,12 +60,11 @@ struct MisagoAPI {
         let digitWeightsPath = environment("MISAGO_DIGIT_WEIGHTS", default: ".tmp/models/digits.json")
         let regionsPath = environment("MISAGO_REGIONS", default: ".tmp/models/regions.json")
         let publicDirectory = environment("MISAGO_PUBLIC", default: ".tmp/public")
-        let threshold = Float(environment("MISAGO_THRESHOLD", default: "0.5")) ?? 0.5
         app.http.server.configuration.hostname = environment("HOST", default: "0.0.0.0")
         app.http.server.configuration.port = Int(environment("PORT", default: "8080")) ?? 8080
         app.routes.defaultMaxBodySize = "32mb"
 
-        let classifier = try ImageClassifier(weights: try HawkWeights.load(from: URL(fileURLWithPath: weightsPath)), threshold: threshold)
+        let classifier = try ImageClassifier(weights: try HawkWeights.load(from: URL(fileURLWithPath: weightsPath)))
         let digits = try DigitReader(weights: try DigitReaderWeights.load(from: URL(fileURLWithPath: digitWeightsPath)))
         let regions = try RegionTable.load(from: URL(fileURLWithPath: regionsPath))
         app.logger.info("models loaded: classes \(classifier.classes.names.joined(separator: ", ")), regions \(regions.regions.keys.sorted().joined(separator: ", "))")

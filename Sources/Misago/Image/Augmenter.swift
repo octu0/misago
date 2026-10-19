@@ -27,6 +27,12 @@ public struct Augmenter {
         /// (area average) and enlarged back (bilinear), as a crop from a 720p screenshot would look.
         public var degradeProbability: Float = 0.5
         public var minDegradeScale: Float = 0.4
+        /// Probability of hiding the middle of the screen behind a mosaic or blur, so the classifier learns
+        /// the screen from the edge HUD rather than from whatever character or popup sits in the centre.
+        public var centerObscureProbability: Float = 0.35
+        /// Probability of overlays a tutorial or popup would add: 1-2 light panels with text-like stripes and
+        /// a skin-coloured blob (a pointing hand), placed anywhere.
+        public var overlayProbability: Float = 0.35
 
         public init() {}
     }
@@ -90,6 +96,49 @@ public struct Augmenter {
             } else {
                 let cols = Int(Float(w) * uniform(0.0...options.maxPillarboxFraction))
                 p = squeeze(p, left: cols, right: cols, top: 0, bottom: 0)
+            }
+        }
+
+        if unit() < options.centerObscureProbability {
+            let cw = Int(Float(w) * uniform(0.35...0.7))
+            let chh = Int(Float(h) * uniform(0.35...0.7))
+            let x0 = (w - cw) / 2 + Int(Float(w) * uniform(-0.08...0.08))
+            let y0 = (h - chh) / 2 + Int(Float(h) * uniform(-0.08...0.08))
+            if unit() < 0.5 {
+                mosaic(&p, x0: x0, y0: y0, x1: x0 + cw, y1: y0 + chh, block: 3 + Int(unit() * 6))
+            } else {
+                blur(&p, x0: x0, y0: y0, x1: x0 + cw, y1: y0 + chh, radius: 2 + Int(unit() * 3))
+            }
+        }
+
+        if unit() < options.overlayProbability {
+            let panels = 1 + Int(unit() * 2)
+            var k = 0
+            while k < panels {
+                let pw = Int(Float(w) * uniform(0.15...0.4))
+                let ph = Int(Float(h) * uniform(0.1...0.25))
+                let px = Int(Float(w - pw) * unit())
+                let py = Int(Float(h - ph) * unit())
+                let shade = uniform(0.8...0.95)
+                fill(&p, x0: px, y0: py, x1: px + pw, y1: py + ph, value: shade)
+                // Dark text-like stripes inside the panel.
+                var ty = py + max(1, ph / 4)
+                while ty < py + ph - 1 {
+                    let tx0 = px + max(1, pw / 10)
+                    let tx1 = tx0 + Int(Float(pw) * uniform(0.4...0.8))
+                    fill(&p, x0: tx0, y0: ty, x1: min(px + pw - 1, tx1), y1: ty + 1, value: uniform(0.0...0.25))
+                    ty += max(2, ph / 3)
+                }
+                k += 1
+            }
+            if unit() < 0.7 {
+                // Pointing hand: a skin-coloured ellipse with a narrower finger above it.
+                let r = Float(h) * uniform(0.06...0.12)
+                let cx = Float(w) * unit()
+                let cy = Float(h) * unit()
+                let skin: (Float, Float, Float) = (uniform(0.9...1.0), uniform(0.7...0.85), uniform(0.5...0.7))
+                ellipse(&p, cx: cx, cy: cy, rx: r, ry: r * 0.85, color: skin)
+                ellipse(&p, cx: cx - r * 0.3, cy: cy - r * 1.2, rx: r * 0.3, ry: r * 0.8, color: skin)
             }
         }
 
@@ -206,6 +255,108 @@ public struct Augmenter {
         let w = max(1, Int((Float(width) * sw).rounded()))
         let h = max(1, Int((Float(height) * sh).rounded()))
         return (Int((Float(x) + dx).rounded()), Int((Float(y) + dy).rounded()), w, h)
+    }
+
+    /// Replaces the rectangle with blocks of their mean colour.
+    private func mosaic(_ p: inout [Float], x0: Int, y0: Int, x1: Int, y1: Int, block: Int) {
+        let w = ScreenImage.width
+        let ch = ScreenImage.channels
+        let ax = max(0, x0), bx = min(w, x1), ay = max(0, y0), by = min(ScreenImage.height, y1)
+        var by0 = ay
+        while by0 < by {
+            var bx0 = ax
+            while bx0 < bx {
+                var sum: [Float] = [0, 0, 0]
+                var n: Float = 0
+                var y = by0
+                while y < min(by, by0 + block) {
+                    var x = bx0
+                    while x < min(bx, bx0 + block) {
+                        var c = 0
+                        while c < ch {
+                            sum[c] += p[(y * w + x) * ch + c]
+                            c += 1
+                        }
+                        n += 1
+                        x += 1
+                    }
+                    y += 1
+                }
+                y = by0
+                while y < min(by, by0 + block) {
+                    var x = bx0
+                    while x < min(bx, bx0 + block) {
+                        var c = 0
+                        while c < ch {
+                            p[(y * w + x) * ch + c] = sum[c] / max(1, n)
+                            c += 1
+                        }
+                        x += 1
+                    }
+                    y += 1
+                }
+                bx0 += block
+            }
+            by0 += block
+        }
+    }
+
+    /// Box blur of the rectangle (reads from a copy so the result does not smear across passes).
+    private func blur(_ p: inout [Float], x0: Int, y0: Int, x1: Int, y1: Int, radius: Int) {
+        let w = ScreenImage.width
+        let h = ScreenImage.height
+        let ch = ScreenImage.channels
+        let src = p
+        var y = max(0, y0)
+        while y < min(h, y1) {
+            var x = max(0, x0)
+            while x < min(w, x1) {
+                var sum: [Float] = [0, 0, 0]
+                var n: Float = 0
+                var yy = max(0, y - radius)
+                while yy <= min(h - 1, y + radius) {
+                    var xx = max(0, x - radius)
+                    while xx <= min(w - 1, x + radius) {
+                        var c = 0
+                        while c < ch {
+                            sum[c] += src[(yy * w + xx) * ch + c]
+                            c += 1
+                        }
+                        n += 1
+                        xx += 1
+                    }
+                    yy += 1
+                }
+                var c = 0
+                while c < ch {
+                    p[(y * w + x) * ch + c] = sum[c] / n
+                    c += 1
+                }
+                x += 1
+            }
+            y += 1
+        }
+    }
+
+    private func ellipse(_ p: inout [Float], cx: Float, cy: Float, rx: Float, ry: Float, color: (Float, Float, Float)) {
+        let w = ScreenImage.width
+        let ch = ScreenImage.channels
+        var y = max(0, Int(cy - ry))
+        while y <= min(ScreenImage.height - 1, Int(cy + ry)) {
+            var x = max(0, Int(cx - rx))
+            while x <= min(w - 1, Int(cx + rx)) {
+                let dx = (Float(x) - cx) / max(rx, 0.5)
+                let dy = (Float(y) - cy) / max(ry, 0.5)
+                if dx * dx + dy * dy <= 1.0 {
+                    let i = (y * w + x) * ch
+                    p[i] = color.0
+                    p[i + 1] = color.1
+                    p[i + 2] = color.2
+                }
+                x += 1
+            }
+            y += 1
+        }
     }
 
     private func fill(_ p: inout [Float], x0: Int, y0: Int, x1: Int, y1: Int, value: Float) {

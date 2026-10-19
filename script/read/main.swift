@@ -4,14 +4,14 @@ import Misago
 setbuf(stdout, nil)
 
 // Runs the whole pipeline on image files: classify, crop the class's number field, read the digits.
-// Usage: read --weights <classifier.json> --digit-weights <digits.json> --regions <regions.json> [--threshold 0.5] <image>...
+// Usage: read --weights <classifier.json> --digit-weights <digits.json> --regions <regions.json> <image>...
 // Prints one JSON object per line: class, probability, number (-1 when none), digits, confidence, ms.
 
 var weightsPath = ""
 var digitWeightsPath = ""
 var regionsPath = ""
-var threshold: Float = 0.5
 var profile = false
+var showFrames = false
 var imagePaths: [String] = []
 var argIdx = 1
 let args = CommandLine.arguments
@@ -26,7 +26,7 @@ while argIdx < args.count {
     }
     switch arg {
     case "-h", "--help":
-        print("Usage: read --weights <classifier.json> --digit-weights <digits.json> --regions <regions.json> [--threshold 0.5] [--profile] <image>...")
+        print("Usage: read --weights <classifier.json> --digit-weights <digits.json> --regions <regions.json> [--profile] <image>...")
         exit(0)
     case "-w", "--weights":
         if let v = value() { weightsPath = v }
@@ -34,10 +34,10 @@ while argIdx < args.count {
         if let v = value() { digitWeightsPath = v }
     case "--regions":
         if let v = value() { regionsPath = v }
-    case "--threshold":
-        if let v = value(), let f = Float(v) { threshold = f }
     case "--profile":
         profile = true
+    case "--frames":
+        showFrames = true
     default:
         if arg.hasPrefix("-") {
             print("error: unknown argument \(arg)")
@@ -53,7 +53,7 @@ if weightsPath.isEmpty || digitWeightsPath.isEmpty || regionsPath.isEmpty || ima
 }
 let reader: ScreenReader
 do {
-    let classifier = try ImageClassifier(weights: try HawkWeights.load(from: URL(fileURLWithPath: weightsPath)), threshold: threshold)
+    let classifier = try ImageClassifier(weights: try HawkWeights.load(from: URL(fileURLWithPath: weightsPath)))
     let digits = try DigitReader(weights: try DigitReaderWeights.load(from: URL(fileURLWithPath: digitWeightsPath)))
     let regions = try RegionTable.load(from: URL(fileURLWithPath: regionsPath))
     reader = ScreenReader(classifier: classifier, digitReader: digits, regions: regions)
@@ -78,6 +78,29 @@ for path in imagePaths {
         if let reading = result.reading {
             object["digits"] = reading.digits
             object["confidence"] = Double(String(format: "%.4f", reading.confidence)) ?? 0.0
+        }
+        if showFrames, result.verdict.isOther != true, let region = reader.regions.regions[result.verdict.className] {
+            // Per-frame CTC argmax over the strip, "-" for blank: shows where digits are emitted and dropped.
+            let strip = try StripNormalizer.extract(width: decoded.width, height: decoded.height, rgb: decoded.rgb, region: region)
+            let frames = ConvStem.frames(strip.pixels, weights: reader.digitReader.weights.stem)
+            let logits = reader.digitReader.network.frameLogits(flatFeatures: frames, frames: ConvStemWeights.frameCount)
+            var sequence = ""
+            var topProbability = ""
+            for frame in logits {
+                let probs = VectorCalibration.softmax(frame)
+                var best = 0
+                var c = 1
+                while c < probs.count {
+                    if probs[best] < probs[c] {
+                        best = c
+                    }
+                    c += 1
+                }
+                sequence.append(best == 0 ? "-" : Character(String(best - 1)))
+                topProbability.append(probs[best] < 0.6 ? "?" : (probs[best] < 0.9 ? "~" : " "))
+            }
+            object["frames"] = sequence
+            object["frames_confidence"] = topProbability
         }
         if profile {
             // Stage timings, repeated so one-off costs do not dominate.

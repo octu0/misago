@@ -24,6 +24,7 @@ var evalPath = ""
 var evalFraction: Double = 0.1
 var numWorkers = 8
 var augmentCount = 0
+var centerMask: [Float]? = nil
 
 func parseClass(_ spec: String) -> ClassFolder? {
     guard let eq = spec.firstIndex(of: "=") else {
@@ -58,6 +59,7 @@ while argIdx < args.count {
         print("  --eval <path>               Output dataset for evaluation")
         print("  --eval-fraction <0-1>       Share of --class files sent to --eval when no --eval-class is given (default 0.1)")
         print("  --augment <Int>             Augmented copies per training image (crop, color, bars, cutout, noise; default 0)")
+        print("  --center-mask x0,y0,x1,y1   Black out this rectangle (fractions) in every image; train with the same value")
         print("  -p, --parallel <Int>        Decoding threads (default 8)")
         exit(0)
     case "--class":
@@ -82,6 +84,15 @@ while argIdx < args.count {
         if let v = value(), let n = Int(v) { numWorkers = max(1, n) }
     case "--augment":
         if let v = value(), let n = Int(v) { augmentCount = max(0, n) }
+    case "--center-mask":
+        if let v = value() {
+            let parts = v.split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
+            if parts.count != 4 {
+                print("error: --center-mask expects x0,y0,x1,y1")
+                exit(1)
+            }
+            centerMask = parts
+        }
     default:
         print("error: unknown argument \(arg)")
         exit(1)
@@ -181,7 +192,7 @@ func augmentationSeed(_ path: String, _ k: Int) -> UInt64 {
     return hash &+ UInt64(k) &* 0x9E3779B97F4A7C15
 }
 
-func write(items: [Item], to path: String, classes: ClassList, workers: Int, augment: Int) {
+func write(items: [Item], to path: String, classes: ClassList, workers: Int, augment: Int, mask: [Float]?) {
     if items.isEmpty {
         return
     }
@@ -195,7 +206,7 @@ func write(items: [Item], to path: String, classes: ClassList, workers: Int, aug
                       let original = try? ScreenNormalizer.normalize(width: decoded.width, height: decoded.height, rgb: decoded.rgb) else {
                     return []
                 }
-                var out = [original]
+                var out = [mask.map { original.masked($0) } ?? original]
                 var k = 0
                 while k < augment {
                     var augmenter = Augmenter(seed: augmentationSeed(paths[i], k))
@@ -204,7 +215,8 @@ func write(items: [Item], to path: String, classes: ClassList, workers: Int, aug
                         width: decoded.width, height: decoded.height, rgb: decoded.rgb,
                         cropX: crop.x, cropY: crop.y, cropWidth: crop.width, cropHeight: crop.height
                     ) {
-                        out.append(augmenter.augment(cropped))
+                        let augmented = augmenter.augment(cropped)
+                        out.append(mask.map { augmented.masked($0) } ?? augmented)
                     }
                     k += 1
                 }
@@ -256,8 +268,8 @@ func write(items: [Item], to path: String, classes: ClassList, workers: Int, aug
 }
 
 let start = CFAbsoluteTimeGetCurrent()
-write(items: trainItems, to: trainPath, classes: classes, workers: numWorkers, augment: augmentCount)
+write(items: trainItems, to: trainPath, classes: classes, workers: numWorkers, augment: augmentCount, mask: centerMask)
 if evalPath.isEmpty != true {
-    write(items: evalItems, to: evalPath, classes: classes, workers: numWorkers, augment: 0)
+    write(items: evalItems, to: evalPath, classes: classes, workers: numWorkers, augment: 0, mask: centerMask)
 }
 print("done (\(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - start)) s)")

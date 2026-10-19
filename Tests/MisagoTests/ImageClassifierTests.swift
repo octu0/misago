@@ -16,9 +16,9 @@ final class ImageClassifierTests: XCTestCase {
         )
     }
 
-    func testArgmaxAndThresholdFallback() throws {
+    func testArgmaxWinsWithoutFallback() throws {
         let image = ScreenImage()
-        let confident = try ImageClassifier(weights: weights(bOut: [0.0, 3.0, 0.0], calibration: .identity(classCount: 3)), threshold: 0.5)
+        let confident = try ImageClassifier(weights: weights(bOut: [0.0, 3.0, 0.0], calibration: .identity(classCount: 3)))
         let verdict = confident.classify(image)
         XCTAssertEqual(verdict.classIndex, 1)
         XCTAssertEqual(verdict.className, "a_home")
@@ -26,15 +26,15 @@ final class ImageClassifierTests: XCTestCase {
         XCTAssertGreaterThan(verdict.probability, 0.9)
         XCTAssertEqual(verdict.logits, [0.0, 3.0, 0.0])
 
-        // A weak winner falls back to other when below the threshold.
-        let weak = try ImageClassifier(weights: weights(bOut: [0.0, 0.2, 0.0], calibration: .identity(classCount: 3)), threshold: 0.5)
-        let fallback = weak.classify(image)
-        XCTAssertTrue(fallback.isOther)
-        XCTAssertEqual(fallback.className, "other")
-        XCTAssertEqual(fallback.probability, fallback.probabilities[0])
+        // A weak winner still wins: the probability is reported, not turned into `other`.
+        let weak = try ImageClassifier(weights: weights(bOut: [0.0, 0.2, 0.0], calibration: .identity(classCount: 3)))
+        let verdictWeak = weak.classify(image)
+        XCTAssertEqual(verdictWeak.className, "a_home")
+        XCTAssertLessThan(verdictWeak.probability, 0.5)
+        XCTAssertEqual(verdictWeak.probability, verdictWeak.probabilities[1])
 
         // Calibration bias can move the decision.
-        let biased = try ImageClassifier(weights: weights(bOut: [0.0, 0.2, 0.0], calibration: VectorCalibration(scale: 1.0, bias: [0.0, 0.0, 2.0])), threshold: 0.5)
+        let biased = try ImageClassifier(weights: weights(bOut: [0.0, 0.2, 0.0], calibration: VectorCalibration(scale: 1.0, bias: [0.0, 0.0, 2.0])))
         XCTAssertEqual(biased.classify(image).className, "b_home")
     }
 

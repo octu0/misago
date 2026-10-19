@@ -220,10 +220,11 @@ func render(index: Int, config: Config) -> DigitSample? {
         context.fill(CGRect(x: px, y: Double(h - usedHeight) + py, width: rng.range(Double(w) * 0.4, Double(w) - px), height: rng.range(Double(usedHeight) * 0.4, Double(usedHeight) - py)))
     }
 
-    // The number: 1-6 digits, weighted toward 4-5; leading zeros only for "0".
+    // The number: 1-6 digits. Short numbers get a larger share than they have in the wild so that 1- and
+    // 2-digit fields (new accounts) are read as reliably as long ones; leading zeros only for "0".
     let lengthRoll = rng.unit()
     let length: Int
-    if lengthRoll < 0.05 { length = 1 } else if lengthRoll < 0.15 { length = 2 } else if lengthRoll < 0.3 { length = 3 } else if lengthRoll < 0.55 { length = 4 } else if lengthRoll < 0.9 { length = 5 } else { length = 6 }
+    if lengthRoll < 0.12 { length = 1 } else if lengthRoll < 0.30 { length = 2 } else if lengthRoll < 0.48 { length = 3 } else if lengthRoll < 0.70 { length = 4 } else if lengthRoll < 0.93 { length = 5 } else { length = 6 }
     var digits = ""
     var k = 0
     while k < length {
@@ -292,6 +293,20 @@ func render(index: Int, config: Config) -> DigitSample? {
         }
     }
     _ = drawText(context, digits, font: font, size: fontSize, at: CGPoint(x: textX, y: baseline), fill: fill, stroke: outline, strokeWidth: strokeWidth)
+    // Notification badge hugging the end of the number (a red disc with a white mark), sometimes overlapping
+    // the last digit: the reader must still emit that digit.
+    if rng.chance(0.4) {
+        let radius = digitHeight * rng.range(0.35, 0.6)
+        let gap = digitHeight * rng.range(-0.15, 0.6)
+        let cx = textX + Double(textWidth) + gap + radius
+        let cy = baseline + digitHeight * rng.range(0.5, 1.3)
+        if cx + radius <= Double(usedWidth) {
+            context.setFillColor(CGColor(red: rng.range(0.8, 1.0), green: rng.range(0.0, 0.2), blue: rng.range(0.0, 0.2), alpha: 1))
+            context.fillEllipse(in: CGRect(x: cx - radius, y: cy - radius, width: radius * 2, height: radius * 2))
+            let markFill = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
+            _ = drawText(context, rng.chance(0.7) ? "!" : String(rng.int(1, 9)), font: font, size: CGFloat(radius * 1.5), at: CGPoint(x: cx - radius * 0.3, y: cy - radius * 0.55), fill: markFill, stroke: nil, strokeWidth: 0)
+        }
+    }
 
     guard let data = context.data else {
         return nil

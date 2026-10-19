@@ -28,6 +28,7 @@ var evalPath = ""
 var exportWeightsPath: String? = nil
 var importWeightsPath: String? = nil
 var evalDumpPath = ""
+var centerMask: [Float]? = nil
 var seed: UInt64 = 7
 
 var argIdx = 1
@@ -53,6 +54,7 @@ while argIdx < args.count {
         print("  --export-weights <path>    Output path for the trained weights (JSON)")
         print("  --import-weights <path>    Initial weights (eval only with -e 0)")
         print("  --eval-dump <jsonl>        Write per-sample eval results (with source paths when <eval>.meta.json exists)")
+        print("  --center-mask x0,y0,x1,y1  Record the mask the datasets were built with, so inference applies it too")
         exit(0)
     case "--train":
         if let v = value() { trainPath = v }
@@ -70,6 +72,13 @@ while argIdx < args.count {
         if let v = value() { importWeightsPath = v }
     case "--eval-dump":
         if let v = value() { evalDumpPath = v }
+    case "--center-mask":
+        if let v = value() {
+            let parts = v.split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
+            if parts.count == 4 {
+                centerMask = parts
+            }
+        }
     default:
         print("error: unknown argument \(arg)")
         exit(1)
@@ -340,7 +349,8 @@ let trainResult = evaluate(trainer, trainSet)
 report("train", trainResult, calibration: calibration)
 
 // The exported weights must give the same logits on the CPU path.
-let exported = mlxNetwork.exportWeights(classes: classes, calibration: calibration)
+var exported = mlxNetwork.exportWeights(classes: classes, calibration: calibration)
+exported.centerMask = centerMask ?? importedWeights?.centerMask
 let cpu = HawkNetwork(weights: exported)
 var worst: Float = 0.0
 var k = 0

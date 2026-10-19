@@ -32,23 +32,23 @@ public struct ImageVerdict: Sendable, Equatable {
     }
 }
 
-/// Image → row-scan frames → Hawk → calibrated class probabilities.
-///
-/// The most probable class wins. When it is not `other` but its probability is below `threshold`, the
-/// verdict falls back to `other` so that callers can treat low-confidence matches as "not recognized".
+/// Image → row-scan frames → Hawk → calibrated class probabilities. The most probable class wins; every
+/// class, `other` included, is a screen of the target, and the probabilities are returned for callers that
+/// want their own cut-off.
 public final class ImageClassifier: @unchecked Sendable {
     public let network: HawkNetwork
     public let classes: ClassList
-    public let threshold: Float
-
-    public init(weights: HawkWeights, threshold: Float = 0.5) throws {
+    public init(weights: HawkWeights) throws {
         self.network = HawkNetwork(weights: weights)
         self.classes = try ClassList(names: weights.classNames)
-        self.threshold = threshold
     }
 
     public func classify(_ image: ScreenImage) -> ImageVerdict {
-        let logits = network.logits(flatFeatures: RowScanEncoder.encodeFlat(image), frames: RowScanEncoder.frameCount)
+        var input = image
+        if let mask = network.weights.centerMask {
+            input = image.masked(mask)
+        }
+        let logits = network.logits(flatFeatures: RowScanEncoder.encodeFlat(input), frames: RowScanEncoder.frameCount)
         let probabilities = network.probabilities(logits: logits)
         var best = 0
         var c = 1
@@ -57,9 +57,6 @@ public final class ImageClassifier: @unchecked Sendable {
                 best = c
             }
             c += 1
-        }
-        if best != 0 && probabilities[best] < threshold {
-            best = 0
         }
         return ImageVerdict(
             classIndex: best,

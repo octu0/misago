@@ -53,6 +53,8 @@ public struct HawkWeights: Sendable, Codable, Equatable {
     public let classNames: [String]  // [outputDim]
     public var calibrationScale: Float
     public var calibrationBias: [Float]  // [outputDim]
+    /// Optional rectangle [x0, y0, x1, y1] (fractions) blacked out before classification, as in training.
+    public var centerMask: [Float]?
 
     /// RG-LRU decay exponent c: a_t = σ(Λ)^(c·r_t).
     public static let decayExponent: Float = 8.0
@@ -105,7 +107,7 @@ public struct HawkWeights: Sendable, Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case inputDim, modelDim, rnnDim, mlpDim, heads, convWidth, convRight, outputDim
-        case wIn, bIn, layers, finalNorm, wOut, bOut, classNames, calibrationScale, calibrationBias
+        case wIn, bIn, layers, finalNorm, wOut, bOut, classNames, calibrationScale, calibrationBias, centerMask
     }
 
     public init(from decoder: Decoder) throws {
@@ -127,6 +129,7 @@ public struct HawkWeights: Sendable, Codable, Equatable {
         classNames = try c.decode([String].self, forKey: .classNames)
         calibrationScale = try c.decodeIfPresent(Float.self, forKey: .calibrationScale) ?? 1.0
         calibrationBias = try c.decodeIfPresent([Float].self, forKey: .calibrationBias) ?? [Float](repeating: 0.0, count: outputDim)
+        centerMask = try c.decodeIfPresent([Float].self, forKey: .centerMask)
     }
 
     public var numLayers: Int {

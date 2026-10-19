@@ -67,6 +67,11 @@ final class DigitTests: XCTestCase {
         XCTAssertEqual(r.width, 400)
         XCTAssertEqual(r.height, 100)
         XCTAssertEqual(try StripNormalizer.extract(width: w, height: h, rgb: rgb, region: region), strip)
+        // With maxAspect the unit becomes width / aspect on squarer images: 1000x1000 at 1.5 -> unit 666.7.
+        let squarer = CropRegion(anchor: .left, x0: 0.0, x1: 0.3, y0: 0.0, y1: 0.3, maxAspect: 1.5)
+        XCTAssertEqual(squarer.unit(width: 1000, height: 1000), 666.666, accuracy: 0.01)
+        XCTAssertEqual(squarer.pixelRect(width: 1000, height: 1000).width, 200)
+        XCTAssertEqual(squarer.unit(width: 1000, height: 500), 500)  // wide image: height wins
         // Center and right anchors.
         XCTAssertEqual(CropRegion(anchor: .center, x0: -0.1, x1: 0.1, y0: 0.0, y1: 0.1).pixelRect(width: w, height: h).x, 450)
         XCTAssertEqual(CropRegion(anchor: .right, x0: -0.2, x1: 0.0, y0: 0.0, y1: 0.1).pixelRect(width: w, height: h).x, 900)

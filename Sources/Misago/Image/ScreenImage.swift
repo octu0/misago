@@ -48,6 +48,30 @@ public struct ScreenImage: Sendable, Equatable {
         return out
     }
 
+    /// A copy with the rectangle [x0, x1) x [y0, y1) (fractions of the width and height) set to black.
+    /// Used to make the classifier ignore the middle of the screen, identically in training and inference.
+    public func masked(_ mask: [Float]) -> ScreenImage {
+        if mask.count != 4 {
+            return self
+        }
+        let x0 = max(0, Int((mask[0] * Float(Self.width)).rounded()))
+        let y0 = max(0, Int((mask[1] * Float(Self.height)).rounded()))
+        let x1 = min(Self.width, Int((mask[2] * Float(Self.width)).rounded()))
+        let y1 = min(Self.height, Int((mask[3] * Float(Self.height)).rounded()))
+        var out = self
+        var y = y0
+        while y < y1 {
+            var i = (y * Self.width + x0) * Self.channels
+            let end = (y * Self.width + x1) * Self.channels
+            while i < end {
+                out.pixels[i] = 0.0
+                i += 1
+            }
+            y += 1
+        }
+        return out
+    }
+
     @inline(__always)
     public static func clamp01(_ v: Float) -> Float {
         if v < 0.0 {
