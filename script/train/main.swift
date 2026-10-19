@@ -29,7 +29,7 @@ var exportWeightsPath: String? = nil
 var importWeightsPath: String? = nil
 var evalDumpPath = ""
 var centerMask: [Float]? = nil
-var seed: UInt64 = 7
+var seed: UInt64 = 9
 
 var argIdx = 1
 let args = CommandLine.arguments
@@ -50,7 +50,7 @@ while argIdx < args.count {
         print("  --eval <path>              Held-out dataset: model selection and probability calibration")
         print("  -e, --epochs <Int>         Number of epochs (default: 20; 0 = eval only)")
         print("  -b, --batch-size <Int>     Mini-batch size (default: \(Defaults.batchSize))")
-        print("  --seed <Int>               Random seed (default: 7)")
+        print("  --seed <Int>               Random seed (default: 9)")
         print("  --export-weights <path>    Output path for the trained weights (JSON)")
         print("  --import-weights <path>    Initial weights (eval only with -e 0)")
         print("  --eval-dump <jsonl>        Write per-sample eval results (with source paths when <eval>.meta.json exists)")
