@@ -26,6 +26,9 @@ var outPath = ""
 var sheetsDir = ""
 var limit = Int.max
 var upscale: CGFloat = 3.0
+var iconsDir = ""
+var iconsLimit = 120
+var iconsSaved = 0
 
 var argIdx = 1
 let args = CommandLine.arguments
@@ -40,7 +43,9 @@ while argIdx < args.count {
     }
     switch arg {
     case "-h", "--help":
-        print("Usage: label --regions <regions.json> --class <name>=<dir> ... --out <labels.jsonl> [--sheets <dir>] [--limit N] [--upscale 3]")
+        print("Usage: label --regions <regions.json> --class <name>=<dir> ... --out <labels.jsonl> [--sheets <dir>] [--limit N] [--upscale 3] [--icons <dir> [--icons-limit 120]]")
+        print("  --icons <dir>   Also save the icon just left of each cleanly read number (a square of 1.35x the digit height),")
+        print("                  for pasting in front of synthetic numbers")
         exit(0)
     case "--regions":
         if let v = value() { regionsPath = v }
@@ -56,6 +61,10 @@ while argIdx < args.count {
         if let v = value() { sheetsDir = v }
     case "--limit":
         if let v = value(), let n = Int(v) { limit = max(1, n) }
+    case "--icons":
+        if let v = value() { iconsDir = v }
+    case "--icons-limit":
+        if let v = value(), let n = Int(v) { iconsLimit = max(0, n) }
     case "--upscale":
         if let v = value(), let f = Double(v) { upscale = CGFloat(max(1.0, f)) }
     default:
@@ -115,7 +124,7 @@ func upscaled(_ image: CGImage, by factor: CGFloat) -> CGImage {
 }
 
 /// Recognized strings with confidence and box height, left to right.
-func recognize(_ image: CGImage) -> [(text: String, confidence: Float, minX: CGFloat, height: CGFloat)] {
+func recognize(_ image: CGImage) -> [(text: String, confidence: Float, minX: CGFloat, height: CGFloat, box: CGRect)] {
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
     request.usesLanguageCorrection = false
@@ -126,10 +135,10 @@ func recognize(_ image: CGImage) -> [(text: String, confidence: Float, minX: CGF
     } catch {
         return []
     }
-    var out: [(String, Float, CGFloat, CGFloat)] = []
+    var out: [(String, Float, CGFloat, CGFloat, CGRect)] = []
     for observation in request.results ?? [] {
         if let candidate = observation.topCandidates(1).first {
-            out.append((candidate.string, candidate.confidence, observation.boundingBox.minX, observation.boundingBox.height))
+            out.append((candidate.string, candidate.confidence, observation.boundingBox.minX, observation.boundingBox.height, observation.boundingBox))
         }
     }
     return out.sorted { $0.2 < $1.2 }
@@ -193,6 +202,7 @@ for folder in folders {
                 // The field's number is the tallest text with digits (secondary numbers such as a personal best
                 // are printed smaller); among equal heights take the longer run.
                 var bestHeight: CGFloat = -1.0
+                var bestBox: CGRect? = nil
                 for result in results {
                     let run = longestDigitRun(result.text)
                     if run.isEmpty {
@@ -202,6 +212,26 @@ for folder in folders {
                         digits = run
                         confidence = result.confidence
                         bestHeight = max(bestHeight, result.height)
+                        bestBox = result.text.trimmingCharacters(in: .whitespaces) == run ? result.box : nil
+                    }
+                }
+                // Icon export: only when the chosen observation is digits alone, so its box is the number.
+                if iconsDir.isEmpty != true && iconsSaved < iconsLimit, let box = bestBox, 3 <= digits.count {
+                    let w = CGFloat(image.width)
+                    let h = CGFloat(image.height)
+                    let textH = box.height * h
+                    let side = textH * 1.35
+                    let x1 = box.minX * w - textH * 0.05
+                    let cy = (1.0 - box.midY) * h
+                    let rect = CGRect(x: x1 - side, y: cy - side / 2, width: side, height: side).integral
+                    if 0 <= rect.minX && 0 <= rect.minY && rect.maxX <= w && rect.maxY <= h && 8 <= rect.width, let icon = image.cropping(to: rect) {
+                        try? FileManager.default.createDirectory(atPath: iconsDir, withIntermediateDirectories: true)
+                        let url = URL(fileURLWithPath: iconsDir).appendingPathComponent(String(format: "icon_%03d.png", iconsSaved))
+                        if let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) {
+                            CGImageDestinationAddImage(dest, icon, nil)
+                            CGImageDestinationFinalize(dest)
+                            iconsSaved += 1
+                        }
                     }
                 }
             }

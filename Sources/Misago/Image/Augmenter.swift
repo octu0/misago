@@ -14,11 +14,11 @@ public struct Augmenter {
         public var maxBrightnessShift: Float = 0.2
         public var contrastRange: ClosedRange<Float> = 0.7...1.3
         public var maxChannelGain: Float = 0.2
-        /// Probability of adding bars, and their maximum fraction of the height (letterbox: a 19.5:9 phone in a
-        /// 16:9 canvas has 9% bars) or width (pillarbox: a 4:3 tablet has 25% bars).
+        /// Probability of adding bars, and their maximum fraction of the height (letterbox) or width (pillarbox).
+        /// Kept small: the content is squeezed inwards, and wide bars push the edge UI into a center mask.
         public var barProbability: Float = 0.5
-        public var maxLetterboxFraction: Float = 0.12
-        public var maxPillarboxFraction: Float = 0.25
+        public var maxLetterboxFraction: Float = 0.06
+        public var maxPillarboxFraction: Float = 0.08
         /// Number of cutout rectangles, each up to this fraction of the width and height.
         public var cutoutCount: ClosedRange<Int> = 0...3
         public var maxCutoutFraction: Float = 0.35

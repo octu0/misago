@@ -13,11 +13,14 @@ setbuf(stdout, nil)
 // the number. The label is the number. Fonts and backgrounds are tool inputs; nothing game-specific is coded.
 
 var fontPaths: [String] = []
+var iconDirs: [String] = []
 var backgroundDirs: [String] = []
 var count = 10000
 var outPath = ""
 var seed: UInt64 = 1
 var numWorkers = 8
+var repeatProbability = 0.3
+var iconColor: [ClosedRange<Int>] = []  // per-channel RGB ranges; empty keeps every icon
 
 var argIdx = 1
 let args = CommandLine.arguments
@@ -32,8 +35,28 @@ while argIdx < args.count {
     }
     switch arg {
     case "-h", "--help":
-        print("Usage: synth --font <ttf> ... --background <dir> ... --count <N> --out <out.msgd> [--seed 1] [-p 8]")
+        print("Usage: synth --font <ttf> ... --background <dir> ... [--icons <dir>] --count <N> --out <out.msgd> [--seed 1] [-p 8]")
+        print("  --icons <dir>   Icons cut from real screenshots (label --icons); pasted right before the number")
+        print("  --icon-color <r0-r1,g0-g1,b0-b1>")
+        print("                  Keep only icons with at least 20% of pixels inside these RGB ranges (drops wrong crops)")
+        print("  --repeat <0-1>  Share of numbers rewritten into repeated-digit patterns (default 0.3)")
         exit(0)
+    case "--icons":
+        if let v = value() { iconDirs.append(v) }
+    case "--icon-color":
+        if let v = value() {
+            let ranges = v.split(separator: ",").compactMap { part -> ClosedRange<Int>? in
+                let bounds = part.split(separator: "-").compactMap { Int($0) }
+                return bounds.count == 2 && bounds[0] <= bounds[1] ? bounds[0]...bounds[1] : nil
+            }
+            if ranges.count != 3 {
+                print("error: --icon-color expects r0-r1,g0-g1,b0-b1")
+                exit(1)
+            }
+            iconColor = ranges
+        }
+    case "--repeat":
+        if let v = value(), let p = Double(v) { repeatProbability = min(1, max(0, p)) }
     case "--font":
         if let v = value() { fontPaths.append(v) }
     case "--background":
@@ -99,6 +122,46 @@ for dir in backgroundDirs {
 let backgrounds = BackgroundBank(paths: backgroundPaths)
 print("backgrounds: \(backgroundPaths.count) images")
 
+/// Real icons from `label --icons`. With --icon-color, crops whose pixels mostly fall outside the given color are
+/// dropped: the extraction sometimes catches a neighboring element instead of the icon.
+var icons: [CGImage] = []
+var rejectedIcons = 0
+for dir in iconDirs {
+    for path in listImages(directory: dir) {
+        guard let decoded = try? loadRGB(path: path) else {
+            continue
+        }
+        var i = 0
+        if iconColor.isEmpty != true {
+            var matching = 0
+            while i < decoded.width * decoded.height {
+                if iconColor[0].contains(Int(decoded.rgb[i * 3])) && iconColor[1].contains(Int(decoded.rgb[i * 3 + 1]))
+                    && iconColor[2].contains(Int(decoded.rgb[i * 3 + 2])) {
+                    matching += 1
+                }
+                i += 1
+            }
+            if Double(matching) < Double(decoded.width * decoded.height) * 0.2 {
+                rejectedIcons += 1
+                continue
+            }
+        }
+        var rgba = [UInt8](repeating: 255, count: decoded.width * decoded.height * 4)
+        i = 0
+        while i < decoded.width * decoded.height {
+            rgba[i * 4] = decoded.rgb[i * 3]
+            rgba[i * 4 + 1] = decoded.rgb[i * 3 + 1]
+            rgba[i * 4 + 2] = decoded.rgb[i * 3 + 2]
+            i += 1
+        }
+        if let provider = CGDataProvider(data: Data(rgba) as CFData),
+           let image = CGImage(width: decoded.width, height: decoded.height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: decoded.width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue), provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent) {
+            icons.append(image)
+        }
+    }
+}
+print("icons: \(icons.count) kept, \(rejectedIcons) rejected (color)")
+
 struct Rng {
     var state: SplitMix64
     init(seed: UInt64) {
@@ -154,10 +217,14 @@ final class Config: @unchecked Sendable {
     let seed: UInt64
     let fonts: [CTFont]
     let backgrounds: BackgroundBank
-    init(seed: UInt64, fonts: [CTFont], backgrounds: BackgroundBank) {
+    let icons: [CGImage]
+    let repeatProbability: Double
+    init(seed: UInt64, fonts: [CTFont], backgrounds: BackgroundBank, icons: [CGImage], repeatProbability: Double) {
         self.seed = seed
+        self.repeatProbability = repeatProbability
         self.fonts = fonts
         self.backgrounds = backgrounds
+        self.icons = icons
     }
 }
 
@@ -225,13 +292,42 @@ func render(index: Int, config: Config) -> DigitSample? {
     let lengthRoll = rng.unit()
     let length: Int
     if lengthRoll < 0.12 { length = 1 } else if lengthRoll < 0.30 { length = 2 } else if lengthRoll < 0.48 { length = 3 } else if lengthRoll < 0.70 { length = 4 } else if lengthRoll < 0.93 { length = 5 } else { length = 6 }
-    var digits = ""
+    var values: [Int] = []
     var k = 0
     while k < length {
-        let d = (k == 0 && 1 < length) ? rng.int(1, 9) : rng.int(0, 9)
-        digits.append(Character(String(d)))
+        values.append((k == 0 && 1 < length) ? rng.int(1, 9) : rng.int(0, 9))
         k += 1
     }
+    // Repeated digits are rare among independent draws but common in real counters (round numbers, runs of one
+    // digit): the reader must keep the length of a run and the digit before it, so a share of the numbers is
+    // rewritten into such patterns.
+    if 1 < length && rng.chance(config.repeatProbability) {
+        let pattern = rng.unit()
+        if pattern < 0.45 {
+            // Leading digit followed by zeros, sometimes with a short random tail.
+            let tail = rng.chance(0.3) ? rng.int(1, max(1, (length - 1) / 2)) : 0
+            var i = 1
+            while i < length - tail {
+                values[i] = 0
+                i += 1
+            }
+        } else if pattern < 0.7 {
+            // Every digit the same.
+            let d = rng.int(1, 9)
+            values = [Int](repeating: d, count: length)
+        } else {
+            // A run of one digit (2 or more long) somewhere in the number.
+            let runLength = rng.int(2, length)
+            let start = rng.int(0, length - runLength)
+            let d = start == 0 ? rng.int(1, 9) : rng.int(0, 9)
+            var i = start
+            while i < start + runLength {
+                values[i] = d
+                i += 1
+            }
+        }
+    }
+    let digits = values.map { String($0) }.joined()
     let font = fonts[rng.int(0, fonts.count - 1)]
     // Digit height 35-75% of the used height.
     let digitHeight = Double(usedHeight) * rng.range(0.35, 0.75)
@@ -251,16 +347,22 @@ func render(index: Int, config: Config) -> DigitSample? {
     let sized = CTFontCreateCopyWithAttributes(font, fontSize, nil, nil)
     let measureLine = CTLineCreateWithAttributedString(NSAttributedString(string: digits, attributes: [kCTFontAttributeName as NSAttributedString.Key: sized]))
     let textWidth = CGFloat(CTLineGetTypographicBounds(measureLine, nil, nil, nil))
-    let iconWidth = rng.chance(0.7) ? digitHeight * rng.range(0.9, 1.4) : 0.0
+    let iconWidth = rng.chance(0.8) ? digitHeight * rng.range(1.2, 1.6) : 0.0
     let maxX = Double(usedWidth) - Double(textWidth) - 4.0
     if maxX < 2.0 {
         return render(index: index + 1_000_003, config: config)  // too wide: try other random values
     }
     let textX = rng.range(min(2.0 + iconWidth, maxX), maxX)
     let baseline = Double(h - usedHeight) + rng.range(2.0, max(2.0, Double(usedHeight) - digitHeight - 2.0)) + digitHeight * 0.05
-    // Icon left of the number: a cup-like emoji (its stem looks like a "1" and must not be read as one) or a blob.
+    // Icon left of the number: an icon cut from real screenshots (--icons), a cup-like emoji (its stem looks like a "1" and must not be read as one) or a blob.
     if 0.0 < iconWidth && iconWidth < textX {
-        if rng.chance(0.6) {
+        if config.icons.isEmpty != true && rng.chance(0.7) {
+            let icon = config.icons[rng.int(0, config.icons.count - 1)]
+            let side = digitHeight * rng.range(1.15, 1.5)
+            let gap = digitHeight * rng.range(-0.05, 0.12)
+            context.interpolationQuality = .high
+            context.draw(icon, in: CGRect(x: textX - side - gap, y: baseline - digitHeight * rng.range(0.1, 0.3), width: side, height: side))
+        } else if rng.chance(0.6) {
             let emojiFont = CTFontCreateWithName("AppleColorEmoji" as CFString, CGFloat(digitHeight * 1.1), nil)
             let line = CTLineCreateWithAttributedString(NSAttributedString(string: ["🏆", "🥇", "🏅", "⭐"][rng.int(0, 3)], attributes: [kCTFontAttributeName as NSAttributedString.Key: emojiFont]))
             context.saveGState()
@@ -342,7 +444,7 @@ do {
     print("error: cannot create \(outPath): \(error)")
     exit(1)
 }
-let config = Config(seed: seed, fonts: fonts, backgrounds: backgrounds)
+let config = Config(seed: seed, fonts: fonts, backgrounds: backgrounds, icons: icons, repeatProbability: repeatProbability)
 let chunk = 512
 var done = 0
 while done < count {

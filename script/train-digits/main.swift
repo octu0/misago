@@ -226,9 +226,11 @@ if 0 < epochs {
     let totalSteps = max(1, epochs * stepsPerEpoch)
     let warmupSteps = min(max(Defaults.minWarmupSteps, totalSteps / Defaults.warmupStepDivisor), max(1, totalSteps / 2))
     print("  learning rate \(Defaults.lrMax) -> \(Defaults.lrMin), steps \(totalSteps) (warmup \(warmupSteps)), grad clip \(Defaults.clipNorm)")
-    var rng = SystemRandomNumberGenerator()
+    // The batch order comes from the seed too, so one seed always gives the same run.
+    var rng = SplitMix64(seed: seed)
     var indices = Array(0..<trainSet.count)
-    // Selection: highest eval exact-match count, ties broken by lower CER (train loss when there is no eval set).
+    // Selection: highest eval exact-match count in the second half, ties broken by lower CER then by later epoch
+    // (train loss when there is no eval set).
     var bestScore: (exact: Int, cer: Float) = (-1, Float.greatestFiniteMagnitude)
     var bestEpoch = 0
     var globalStep = 0
@@ -262,7 +264,10 @@ if 0 < epochs {
             score = (r.exact, r.cer)
         }
         line += " (\(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - epStart)) s, grad norm \(String(format: "%.2f", trainer.lastGradientNorm)))"
-        if bestScore.exact < score.exact || (bestScore.exact == score.exact && score.cer < bestScore.cer) {
+        // Only the second half of the schedule is eligible (the learning rate has decayed), and ties go to the
+        // later epoch: the held-out set is small, so an early epoch can tie a converged one by chance.
+        let eligible = epochs / 2 < ep
+        if eligible && (bestScore.exact < score.exact || (bestScore.exact == score.exact && score.cer <= bestScore.cer)) {
             bestScore = score
             bestEpoch = ep
             bestWeights = mlxNetwork.exportWeights()

@@ -193,6 +193,14 @@ func augmentationSeed(_ path: String, _ k: Int) -> UInt64 {
 }
 
 func write(items: [Item], to path: String, classes: ClassList, workers: Int, augment: Int, mask: [Float]?) {
+    // With a center mask, obscuring the middle is redundant and its margin would blur the edge UI the mask keeps.
+    let augmentOptions: Augmenter.Options = {
+        var options = Augmenter.Options()
+        if mask != nil {
+            options.centerObscureProbability = 0
+        }
+        return options
+    }()
     if items.isEmpty {
         return
     }
@@ -209,7 +217,7 @@ func write(items: [Item], to path: String, classes: ClassList, workers: Int, aug
                 var out = [mask.map { original.masked($0) } ?? original]
                 var k = 0
                 while k < augment {
-                    var augmenter = Augmenter(seed: augmentationSeed(paths[i], k))
+                    var augmenter = Augmenter(seed: augmentationSeed(paths[i], k), options: augmentOptions)
                     let crop = augmenter.cropRect(width: decoded.width, height: decoded.height)
                     if let cropped = try? ScreenNormalizer.normalize(
                         width: decoded.width, height: decoded.height, rgb: decoded.rgb,

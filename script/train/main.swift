@@ -241,7 +241,8 @@ if 0 < epochs {
     let totalSteps = max(1, epochs * stepsPerEpoch)
     let warmupSteps = min(max(Defaults.minWarmupSteps, totalSteps / Defaults.warmupStepDivisor), max(1, totalSteps / 2))
     print("  learning rate \(Defaults.lrMax) -> \(Defaults.lrMin), steps \(totalSteps) (warmup \(warmupSteps)), grad clip \(Defaults.clipNorm)")
-    var rng = SystemRandomNumberGenerator()
+    // The batch order comes from the seed too, so one seed always gives the same run.
+    var rng = SplitMix64(seed: seed)
     var indices = Array(0..<trainSet.count)
     // Selection: highest eval accuracy, ties broken by lower eval loss. Loss alone picks very early epochs
     // when the frequent classes converge first and the rare, diverse ones are still underfit; calibration

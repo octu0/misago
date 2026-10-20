@@ -49,6 +49,7 @@ products += [
     .executable(name: "prepare", targets: ["prepare"]),
     .executable(name: "prepare-digits", targets: ["prepare-digits"]),
     .executable(name: "classify", targets: ["classify"]),
+    .executable(name: "stability", targets: ["stability"]),
     .executable(name: "read", targets: ["read"]),
     .executable(name: "label", targets: ["label"]),
     .executable(name: "synth", targets: ["synth"])
@@ -86,6 +87,7 @@ targets += [
     .executableTarget(name: "prepare-digits", dependencies: ["Misago"], path: "script/prepare-digits"),
     // One image -> verdict (ImageIO).
     .executableTarget(name: "classify", dependencies: ["Misago"], path: "script/classify"),
+    .executableTarget(name: "stability", dependencies: ["Misago"], path: "script/stability"),
     // Whole pipeline on one image: class and number (ImageIO).
     .executableTarget(name: "read", dependencies: ["Misago"], path: "script/read"),
     // Number-field labeling with the system OCR (Vision), for review before training the reader.
