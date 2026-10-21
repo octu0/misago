@@ -73,13 +73,12 @@ for path in weightPaths {
         exit(1)
     }
     let network = HawkNetwork(weights: weights)
-    let calibration = weights.calibration
     let classCount = reader.classes.count
     var flat = [Float](repeating: 0, count: features.count * classCount)
     flat.withUnsafeMutableBufferPointer { buffer in
         let base = buffer.baseAddress!
         DispatchQueue.concurrentPerform(iterations: features.count) { k in
-            let probs = calibration.probabilities(network.logits(flatFeatures: features[k], frames: RowScanEncoder.frameCount))
+            let probs = network.probabilities(logits: network.logits(flatFeatures: features[k], frames: RowScanEncoder.frameCount))
             var c = 0
             while c < classCount {
                 base[k * classCount + c] = probs[c]
@@ -102,25 +101,26 @@ func argmax(_ v: [Float]) -> Int {
     return best
 }
 
+// Screens only: samples labeled none (no class) are left out.
+let labeled = (0..<labels.count).filter { 0 <= labels[$0] }
 let predictions = probabilities.map { $0.map(argmax) }
 for (m, path) in weightPaths.enumerated() {
-    let correct = zip(predictions[m], labels).filter { $0 == $1 }.count
-    print("\(path): \(correct)/\(labels.count) correct")
+    let correct = labeled.filter { predictions[m][$0] == labels[$0] }.count
+    print("\(path): \(correct)/\(labeled.count) correct")
 }
 var a = 0
 while a < weightPaths.count {
     var b = a + 1
     while b < weightPaths.count {
-        let same = zip(predictions[a], predictions[b]).filter { $0 == $1 }.count
-        print("agreement \(a)-\(b): \(same)/\(labels.count) (\(String(format: "%.2f", Float(same) * 100 / Float(max(1, labels.count))))%)")
+        let same = labeled.filter { predictions[a][$0] == predictions[b][$0] }.count
+        print("agreement \(a)-\(b): \(same)/\(labeled.count) (\(String(format: "%.2f", Float(same) * 100 / Float(max(1, labeled.count))))%)")
         b += 1
     }
     a += 1
 }
 
 var unstable = 0
-var k = 0
-while k < labels.count {
+for k in labeled {
     let classesSeen = Set(predictions.map { $0[k] })
     let truth = probabilities.map { $0[k][labels[k]] }
     let spread = (truth.max() ?? 0) - (truth.min() ?? 0)
@@ -129,7 +129,6 @@ while k < labels.count {
         let values = truth.map { String(format: "%.2f", $0) }.joined(separator: " ")
         print("  unstable \(paths[k].isEmpty ? "#\(k)" : paths[k])  label \(reader.classes[labels[k]])  p(label) \(values)")
     }
-    k += 1
 }
-print("unstable: \(unstable)/\(labels.count) (spread > \(maxSpread) or differing predictions)")
+print("unstable: \(unstable)/\(labeled.count) (spread > \(maxSpread) or differing predictions)")
 print(unstable == 0 ? "verdict: stable across seeds" : "verdict: results depend on the seed")

@@ -35,6 +35,55 @@ final class VectorCalibrationTests: XCTestCase {
         XCTAssertEqual(fit.bias[2], 0.5, accuracy: 0.2)
     }
 
+    /// Temperature scaling only: data drawn from softmax(0.5 · logits) gives scale 0.5 and no bias.
+    func testFitScaleOnlyKeepsBiasZero() {
+        let trueCalibration = VectorCalibration(scale: 0.5, bias: [0.0, 0.0, 0.0])
+        var logits: [[Float]] = []
+        var labels: [Int] = []
+        var i = 0
+        while i < 6000 {
+            let row: [Float] = [Float((i * 37) % 200) / 10.0 - 10.0, Float((i * 91) % 200) / 10.0 - 10.0, Float((i * 53) % 200) / 10.0 - 10.0]
+            let p = trueCalibration.probabilities(row)
+            let u = Float((i * 7919) % 1000) / 1000.0
+            var label = p.count - 1
+            var cumulative: Float = 0.0
+            var c = 0
+            while c < p.count {
+                cumulative += p[c]
+                if u < cumulative {
+                    label = c
+                    break
+                }
+                c += 1
+            }
+            logits.append(row)
+            labels.append(label)
+            i += 1
+        }
+        let fit = VectorCalibration.fit(logits: logits, labels: labels, classCount: 3, fitBias: false)
+        XCTAssertEqual(fit.scale, 0.5, accuracy: 0.05)
+        XCTAssertEqual(fit.bias, [0.0, 0.0, 0.0])
+    }
+
+    /// Labels drawn from σ(0.5 · x − 1): Platt scaling recovers the scale and bias.
+    func testPlattScalingRecoversScaleAndBias() {
+        var logits: [Float] = []
+        var targets: [Bool] = []
+        var i = 0
+        while i < 8000 {
+            let x = Float((i * 37) % 400) / 20.0 - 10.0
+            let p = 1.0 / (1.0 + exp(-(0.5 * x - 1.0)))
+            let u = Float((i * 7919) % 1000) / 1000.0
+            logits.append(x)
+            targets.append(u < p)
+            i += 1
+        }
+        let fit = PlattScaling.fit(logits: logits, targets: targets)
+        XCTAssertEqual(fit.scale, 0.5, accuracy: 0.05)
+        XCTAssertEqual(fit.bias, -1.0, accuracy: 0.15)
+        XCTAssertEqual(PlattScaling.fit(logits: [1, 2], targets: [true, true]).scale, 1.0)
+    }
+
     func testSeparableDataStaysFinite() {
         let logits: [[Float]] = [[3, -3], [2, -2], [1, -1], [-1, 1], [-2, 2], [-3, 3]]
         let labels = [0, 0, 0, 1, 1, 1]

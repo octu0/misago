@@ -50,10 +50,15 @@ public final class HawkNetwork: @unchecked Sendable {
 
     /// Same as `logits(features:)` with the frames already concatenated ([frames * inputDim]).
     public func logits(flatFeatures chunk: [Float], frames: Int) -> [Float] {
+        return logitsAndPooled(flatFeatures: chunk, frames: frames).logits
+    }
+
+    /// Logits and the pooled feature vector they are projected from (the mean of the normed frames).
+    public func logitsAndPooled(flatFeatures chunk: [Float], frames: Int) -> (logits: [Float], pooled: [Float]) {
         let w = weights
         let d = w.modelDim
         if frames <= 0 {
-            return w.bOut
+            return (w.bOut, [Float](repeating: 0.0, count: d))
         }
         let normed = normedHidden(flatFeatures: chunk, frames: frames)
         // Mean of the normed frames, then one projection: logits are linear in the normed vector.
@@ -81,7 +86,7 @@ public final class HawkNetwork: @unchecked Sendable {
         }
         var out = w.bOut
         Self.gemm(pooled, w.wOut, &out, m: 1, n: w.outputDim, k: d, beta: 1.0)
-        return out
+        return (out, pooled)
     }
 
     /// Per-frame logits [frames][outputDim], for sequence labelling (CTC).
@@ -139,9 +144,31 @@ public final class HawkNetwork: @unchecked Sendable {
         return normed
     }
 
-    /// Calibrated class probabilities from classification logits.
+    /// Calibrated screen probabilities from classification logits (the title outputs, if any, are left out).
     public func probabilities(logits: [Float]) -> [Float] {
-        return weights.calibration.probabilities(logits)
+        return weights.calibration.probabilities(Array(logits.prefix(weights.classNames.count)))
+    }
+
+    /// Calibrated independent title probabilities (empty for a model without titles). With `pooled` and a
+    /// feature distance in the weights, the distance to each title's nearest training class enters too.
+    public func titleProbabilities(logits: [Float], pooled: [Float]? = nil) -> [Float] {
+        let titleLogits = Array(logits.dropFirst(weights.classNames.count))
+        guard let pooled = pooled, let distance = weights.featureDistance else {
+            return weights.titleProbabilities(titleLogits)
+        }
+        return weights.titleProbabilities(titleLogits, distances: titleDistances(pooled: pooled, distance: distance))
+    }
+
+    /// Per title, the distance from `pooled` to the nearest mean among that title's classes.
+    public func titleDistances(pooled: [Float], distance: FeatureDistance) -> [Float] {
+        let perClass = distance.distances(pooled)
+        var out = [Float](repeating: Float.greatestFiniteMagnitude, count: weights.titleNames.count)
+        for (c, name) in weights.classNames.enumerated() where c < perClass.count {
+            if let t = weights.titleNames.firstIndex(of: ClassList.title(of: name)) {
+                out[t] = min(out[t], perClass[c])
+            }
+        }
+        return out
     }
 
     /// One layer over the whole sequence; x is [frames, modelDim] and the result replaces it.

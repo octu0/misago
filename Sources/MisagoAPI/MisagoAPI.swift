@@ -13,14 +13,25 @@ import ImageDecoding
 struct ReadResponse: Content {
     let `class`: String
     let probability: Float
+    /// Screen probabilities (a softmax among the screens of all titles).
     let probabilities: [String: Float]
+    /// Title of the winning screen and the independent probability that the image is a screen of it.
+    let title: String
+    let title_probability: Float
+    /// Independent probability of every title: all near 0 for an image of nothing the model knows.
+    let titles: [String: Float]
     let number: Int
     /// 2 = win, 1 = loss, 0 = draw, −1 = not a result screen (class names ending in _win / _lose / _draw).
     let outcome: Int
+    /// 1 during a match (class names ending in _battle or containing _battle_), 0 otherwise.
+    let battle: Int
     let digits: String?
     let confidence: Float?
+    /// Clockwise rotation (0, 90, 180, 270 degrees) that turned the image upright.
+    let rotation: Int
     let ms: Double
-    /// Server-side stage times: decode, normalize (whole-screen downscale), classify, extract (crop), read (digits).
+    /// Server-side stage times: decode, normalize (rotation to landscape and whole-screen downscale), classify
+    /// (class and orientation), extract (upright crop), read (digits).
     let timings_ms: [String: Double]
     let width: Int
     let height: Int
@@ -67,6 +78,7 @@ struct MisagoAPI {
         let classifier = try ImageClassifier(weights: try HawkWeights.load(from: URL(fileURLWithPath: weightsPath)))
         let digits = try DigitReader(weights: try DigitReaderWeights.load(from: URL(fileURLWithPath: digitWeightsPath)))
         let regions = try RegionTable.load(from: URL(fileURLWithPath: regionsPath))
+        let reader = ScreenReader(classifier: classifier, digitReader: digits, regions: regions)
         app.logger.info("models loaded: classes \(classifier.classes.names.joined(separator: ", ")), regions \(regions.regions.keys.sorted().joined(separator: ", "))")
 
         if FileManager.default.fileExists(atPath: publicDirectory) {
@@ -105,25 +117,24 @@ struct MisagoAPI {
             let decodeMs = now() - decodeStart
             // The stages are run separately here (same work as `ScreenReader.read`) so each can be timed.
             let start = now()
-            let image = try ScreenNormalizer.normalize(width: decoded.width, height: decoded.height, rgb: decoded.rgb)
+            let input = try reader.landscape(width: decoded.width, height: decoded.height, rgb: decoded.rgb)
             let normalizeMs = now() - start
             let classifyStart = now()
-            let verdict = classifier.classify(image)
+            let oriented = reader.classify(input)
             let classifyMs = now() - classifyStart
-            var extractMs = 0.0
+            let extractStart = now()
+            let strip = try reader.strip(input, verdict: oriented.verdict, rotation: oriented.rotation)
+            let extractMs = now() - extractStart
             var readMs = 0.0
             var reading: DigitReading? = nil
-            if verdict.isOther != true, let region = regions.regions[verdict.className] {
-                let extractStart = now()
-                let strip = try StripNormalizer.extract(width: decoded.width, height: decoded.height, rgb: decoded.rgb, region: region)
-                extractMs = now() - extractStart
+            if let strip = strip {
                 let readStart = now()
                 reading = digits.read(strip)
                 readMs = now() - readStart
             }
-            let result = ScreenReading(verdict: verdict, reading: reading)
+            let result = ScreenReading(verdict: oriented.verdict, reading: reading, rotation: oriented.rotation)
             let ms = now() - start
-            req.logger.info("read \(result.verdict.className) number=\(result.number) outcome=\(result.outcome) decode=\(round2(decodeMs))ms total=\(round2(ms))ms (normalize \(round2(normalizeMs)), classify \(round2(classifyMs)), extract \(round2(extractMs)), read \(round2(readMs)))")
+            req.logger.info("read \(result.verdict.className) number=\(result.number) rotation=\(result.rotation) battle=\(result.battle) outcome=\(result.outcome) decode=\(round2(decodeMs))ms total=\(round2(ms))ms (normalize \(round2(normalizeMs)), classify \(round2(classifyMs)), extract \(round2(extractMs)), read \(round2(readMs)))")
             var probabilities: [String: Float] = [:]
             var c = 0
             while c < result.verdict.probabilities.count {
@@ -134,10 +145,15 @@ struct MisagoAPI {
                 class: result.verdict.className,
                 probability: result.verdict.probability,
                 probabilities: probabilities,
+                title: result.verdict.title,
+                title_probability: result.verdict.titleProbability,
+                titles: result.verdict.titleProbabilities,
                 number: result.number,
                 outcome: result.outcome,
+                battle: result.battle,
                 digits: result.reading?.digits,
                 confidence: result.reading?.confidence,
+                rotation: result.rotation,
                 ms: round2(ms),
                 timings_ms: ["decode": round2(decodeMs), "normalize": round2(normalizeMs), "classify": round2(classifyMs), "extract": round2(extractMs), "read": round2(readMs)],
                 width: decoded.width,

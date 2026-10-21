@@ -13,6 +13,22 @@ public enum ScreenNormalizer {
         return fit(width: width, height: height, source: BytePixels(rgb), cropX: 0, cropY: 0, cropWidth: width, cropHeight: height)
     }
 
+    /// The input turned clockwise by `degrees` (a multiple of 90), at the cost of turning the 128 x 72 result:
+    /// for 90 and 270 the input is resampled to 72 x 128 first, then that small image is turned.
+    public static func normalize(width: Int, height: Int, rgb: [UInt8], rotation degrees: Int) throws -> ScreenImage {
+        try validate(width: width, height: height, count: rgb.count)
+        let quarter = ((degrees / 90) % 2 + 2) % 2 == 1
+        let outW = quarter ? ScreenImage.height : ScreenImage.width
+        let outH = quarter ? ScreenImage.width : ScreenImage.height
+        let small = Resampler.resample(
+            source: BytePixels(rgb), width: width, height: height, channels: ScreenImage.channels,
+            cropX: 0, cropY: 0, cropWidth: Float(width), cropHeight: Float(height),
+            outWidth: outW, outHeight: outH
+        )
+        let turned = ImageRotation.rotate(width: outW, height: outH, pixels: small, degrees: degrees)
+        return (try? ScreenImage(pixels: turned.pixels)) ?? ScreenImage()
+    }
+
     /// Normalizes a sub-rectangle of the input (in input pixels, clipped to the image).
     public static func normalize(width: Int, height: Int, rgb: [UInt8], cropX: Int, cropY: Int, cropWidth: Int, cropHeight: Int) throws -> ScreenImage {
         try validate(width: width, height: height, count: rgb.count)

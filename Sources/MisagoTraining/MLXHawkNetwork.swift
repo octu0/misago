@@ -286,6 +286,11 @@ public final class MLXHawkNetwork: Module, @unchecked Sendable {
         return matmul(pooled, wOut) + bOut
     }
 
+    /// Pooled features [B, modelDim]: the final RMSNorm output averaged over frames (what `wOut` projects).
+    public func pooled(_ features: MLXArray) -> MLXArray {
+        return mean(hawkRMSNorm(hidden(features), finalNorm), axis: 1)
+    }
+
     /// Per-frame logits [B, T, outputDim], for inspection.
     public func frameLogits(_ features: MLXArray) -> MLXArray {
         return matmul(hawkRMSNorm(hidden(features), finalNorm), wOut) + bOut
@@ -341,13 +346,13 @@ public final class MLXHawkNetwork: Module, @unchecked Sendable {
         eval(self)
     }
 
-    public func exportWeights(classes: ClassList, calibration: VectorCalibration? = nil) -> HawkWeights {
-        return exportWeights(classNames: classes.names, calibration: calibration)
+    public func exportWeights(classes: ClassList, titles: [String] = [], calibration: VectorCalibration? = nil, titleCalibration: [Float]? = nil) -> HawkWeights {
+        return exportWeights(classNames: classes.names, titles: titles, calibration: calibration, titleCalibration: titleCalibration)
     }
 
-    /// Export with arbitrary output names (the digit vocabulary for the reader).
-    public func exportWeights(classNames: [String], calibration: VectorCalibration? = nil) -> HawkWeights {
-        precondition(classNames.count == outputDim, "name count must equal outputDim")
+    /// Export with arbitrary output names (the digit vocabulary for the reader). Titles follow the classes.
+    public func exportWeights(classNames: [String], titles: [String] = [], calibration: VectorCalibration? = nil, titleCalibration: [Float]? = nil) -> HawkWeights {
+        precondition(classNames.count + titles.count == outputDim, "class and title count must equal outputDim")
         eval(self)
         func values(_ x: MLXArray) -> [Float] {
             return x.asArray(Float.self)
@@ -378,7 +383,9 @@ public final class MLXHawkNetwork: Module, @unchecked Sendable {
             bOut: values(bOut),
             classNames: classNames,
             calibrationScale: calibration?.scale ?? 1.0,
-            calibrationBias: calibration?.bias
+            calibrationBias: calibration?.bias,
+            titleNames: titles,
+            titleCalibration: titleCalibration
         )
     }
 }

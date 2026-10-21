@@ -31,6 +31,8 @@ public enum DatasetFormat {
     public static let fixedHeaderSize = 20
     public static let countOffset = 8
     public static let sampleSize = 2 + ScreenImage.pixelCount
+    /// Stored label of a sample that belongs to no class.
+    public static let noneLabelValue: UInt16 = 0xFFFF
 
     static func classTableSize(_ classes: ClassList) -> Int {
         var n = 0
@@ -50,6 +52,9 @@ public enum DatasetFormat {
 }
 
 public struct DatasetSample: Sendable, Equatable {
+    /// Label of a sample that belongs to no class and no title (an image of something else entirely).
+    public static let noneLabel = -1
+
     public let label: Int
     public let image: ScreenImage
 
@@ -96,11 +101,11 @@ public final class DatasetWriter {
     }
 
     public func append(_ sample: DatasetSample) throws {
-        if sample.label < 0 || classes.count <= sample.label {
+        if sample.label < DatasetSample.noneLabel || classes.count <= sample.label {
             throw DatasetFileError.invalidLabel(sample.label)
         }
         var data = Data(capacity: DatasetFormat.sampleSize)
-        data.append(contentsOf: Self.le16(UInt16(sample.label)))
+        data.append(contentsOf: Self.le16(sample.label == DatasetSample.noneLabel ? DatasetFormat.noneLabelValue : UInt16(sample.label)))
         data.append(contentsOf: sample.image.bytes)
         handle.write(data)
         count += 1
@@ -197,7 +202,7 @@ public final class DatasetReader: @unchecked Sendable {
         }
         var i = 0
         while i < count {
-            let label = Int(Self.read16(data, offset + i * DatasetFormat.sampleSize))
+            let label = Self.decodeLabel(Self.read16(data, offset + i * DatasetFormat.sampleSize))
             if classes.count <= label {
                 throw DatasetFileError.invalidLabel(label)
             }
@@ -210,7 +215,7 @@ public final class DatasetReader: @unchecked Sendable {
         if index < 0 || count <= index {
             throw DatasetFileError.indexOutOfRange(index: index, count: count)
         }
-        return Int(Self.read16(data, samplesOffset + index * DatasetFormat.sampleSize))
+        return Self.decodeLabel(Self.read16(data, samplesOffset + index * DatasetFormat.sampleSize))
     }
 
     public func sample(at index: Int) throws -> DatasetSample {
@@ -218,7 +223,7 @@ public final class DatasetReader: @unchecked Sendable {
             throw DatasetFileError.indexOutOfRange(index: index, count: count)
         }
         let offset = samplesOffset + index * DatasetFormat.sampleSize
-        let label = Int(Self.read16(data, offset))
+        let label = Self.decodeLabel(Self.read16(data, offset))
         let bytes = Array(data[(offset + 2)..<(offset + DatasetFormat.sampleSize)])
         return DatasetSample(label: label, image: try ScreenImage(bytes: bytes))
     }
@@ -229,19 +234,28 @@ public final class DatasetReader: @unchecked Sendable {
         out.reserveCapacity(count)
         var i = 0
         while i < count {
-            out.append(Int(Self.read16(data, samplesOffset + i * DatasetFormat.sampleSize)))
+            out.append(Self.decodeLabel(Self.read16(data, samplesOffset + i * DatasetFormat.sampleSize)))
             i += 1
         }
         return out
     }
 
-    /// Number of samples per class.
+    /// Number of samples per class (samples labeled none are not counted; see `noneCount`).
     public var classCounts: [Int] {
         var counts = [Int](repeating: 0, count: classes.count)
-        for label in labels {
+        for label in labels where 0 <= label {
             counts[label] += 1
         }
         return counts
+    }
+
+    /// Number of samples that belong to no class.
+    public var noneCount: Int {
+        return labels.filter { $0 == DatasetSample.noneLabel }.count
+    }
+
+    private static func decodeLabel(_ value: UInt16) -> Int {
+        return value == DatasetFormat.noneLabelValue ? DatasetSample.noneLabel : Int(value)
     }
 
     private static func read32(_ d: Data, _ offset: Int) -> UInt32 {

@@ -57,7 +57,8 @@ for path in imagePaths {
         let verdict = classifier.classify(image)
         let ms = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
         let distribution = verdict.probabilities.enumerated().map { "\(classifier.classes[$0.offset]) \(String(format: "%.3f", $0.element))" }.joined(separator: ", ")
-        print("\(verdict.className) p=\(String(format: "%.4f", verdict.probability)) [\(distribution)] \(String(format: "%.2f", ms)) ms  \(path) (\(decoded.width)x\(decoded.height))")
+        let titles = verdict.titleProbabilities.sorted { $0.key < $1.key }.map { "\($0.key)=\(String(format: "%.3f", $0.value))" }.joined(separator: " ")
+        print("\(verdict.className) p=\(String(format: "%.4f", verdict.probability)) [\(distribution)] titles \(titles.isEmpty ? "-" : titles) \(String(format: "%.2f", ms)) ms  \(path) (\(decoded.width)x\(decoded.height))")
     } catch {
         print("error  \(path): \(error)")
     }

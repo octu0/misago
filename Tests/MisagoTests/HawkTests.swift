@@ -28,7 +28,7 @@ final class HawkTests: XCTestCase {
         return seq
     }
 
-    private let smallClasses = try! ClassList(others: ["a_home", "b_home"])
+    private let smallClasses = try! ClassList(names: ["other"] + ["a_home", "b_home"])
 
     private func smallNetwork() -> MLXHawkNetwork {
         return MLXHawkNetwork(inputDim: 12, modelDim: 16, rnnDim: 24, mlpDim: 32, heads: 3, convWidth: 4, convRight: 2, numLayers: 2, outputDim: 3)
@@ -97,7 +97,7 @@ final class HawkTests: XCTestCase {
     /// steps before dropping (and a learning rate of 0.005 without warmup collapses to a uniform output), so the
     /// budget is generous.
     func testOverfitsSyntheticScreens() {
-        let classes = try! ClassList(others: ["a_home", "b_home"])
+        let classes = try! ClassList(names: ["other"] + ["a_home", "b_home"])
         let net = MLXHawkNetwork(classCount: classes.count)
         let trainer = MLXClassificationTrainer(network: net, learningRate: 0.002)
         var features: [[Float]] = []

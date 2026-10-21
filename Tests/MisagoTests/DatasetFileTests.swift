@@ -6,7 +6,7 @@ final class DatasetFileTests: XCTestCase {
         return FileManager.default.temporaryDirectory.appendingPathComponent("misago-\(UUID().uuidString).msgo")
     }
 
-    private let classes = try! ClassList(others: ["a_home", "b_lobby"])
+    private let classes = try! ClassList(names: ["other"] + ["a_home", "b_lobby"])
 
     private func image(seed: Int) -> ScreenImage {
         return try! ScreenImage(bytes: (0..<ScreenImage.pixelCount).map { UInt8(($0 * 31 + seed) % 256) })
@@ -30,6 +30,20 @@ final class DatasetFileTests: XCTestCase {
         XCTAssertThrowsError(try reader.sample(at: 3))
         let size = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as! Int
         XCTAssertEqual(size, DatasetFormat.fixedHeaderSize + (6 + 7 + 8) + 3 * DatasetFormat.sampleSize)
+    }
+
+    func testNoneLabelRoundTrips() throws {
+        let url = temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let writer = try DatasetWriter(url: url, classes: classes)
+        try writer.append(DatasetSample(label: DatasetSample.noneLabel, image: image(seed: 4)))
+        try writer.append(DatasetSample(label: 2, image: image(seed: 5)))
+        try writer.close()
+        let reader = try DatasetReader(url: url)
+        XCTAssertEqual(reader.labels, [DatasetSample.noneLabel, 2])
+        XCTAssertEqual(reader.classCounts, [0, 0, 1])
+        XCTAssertEqual(reader.noneCount, 1)
+        XCTAssertEqual(try reader.sample(at: 0).label, DatasetSample.noneLabel)
     }
 
     func testInvalidLabelIsRejected() throws {

@@ -71,17 +71,24 @@ for path in imagePaths {
             "path": path,
             "class": result.verdict.className,
             "probability": Double(String(format: "%.4f", result.verdict.probability)) ?? 0.0,
+            "title": result.verdict.title,
+            "title_probability": Double(String(format: "%.4f", result.verdict.titleProbability)) ?? 0.0,
+            "titles": result.verdict.titleProbabilities.mapValues { Double(String(format: "%.4f", $0)) ?? 0.0 },
             "number": result.number,
             "outcome": result.outcome,
+            "battle": result.battle,
+            "rotation": result.rotation,
             "ms": Double(String(format: "%.2f", ms)) ?? 0.0
         ]
         if let reading = result.reading {
             object["digits"] = reading.digits
             object["confidence"] = Double(String(format: "%.4f", reading.confidence)) ?? 0.0
         }
-        if showFrames, result.verdict.isOther != true, let region = reader.regions.regions[result.verdict.className] {
+        if showFrames, let strip = try reader.strip(
+            try reader.landscape(width: decoded.width, height: decoded.height, rgb: decoded.rgb),
+            verdict: result.verdict, rotation: result.rotation
+        ) {
             // Per-frame CTC argmax over the strip, "-" for blank: shows where digits are emitted and dropped.
-            let strip = try StripNormalizer.extract(width: decoded.width, height: decoded.height, rgb: decoded.rgb, region: region)
             let frames = ConvStem.frames(strip.pixels, weights: reader.digitReader.weights.stem)
             let logits = reader.digitReader.network.frameLogits(flatFeatures: frames, frames: ConvStemWeights.frameCount)
             var sequence = ""
@@ -105,21 +112,19 @@ for path in imagePaths {
         if profile {
             // Stage timings, repeated so one-off costs do not dominate.
             var normalizeMs = 0.0, classifyMs = 0.0, extractMs = 0.0, readMs = 0.0
-            var image = ScreenImage()
-            var verdict: ImageVerdict? = nil
             let runs = 5
             var r = 0
             while r < runs {
                 var t = CFAbsoluteTimeGetCurrent()
-                image = try ScreenNormalizer.normalize(width: decoded.width, height: decoded.height, rgb: decoded.rgb)
+                let input = try reader.landscape(width: decoded.width, height: decoded.height, rgb: decoded.rgb)
                 normalizeMs += (CFAbsoluteTimeGetCurrent() - t) * 1000.0
                 t = CFAbsoluteTimeGetCurrent()
-                verdict = reader.classifier.classify(image)
+                let oriented = reader.classify(input)
                 classifyMs += (CFAbsoluteTimeGetCurrent() - t) * 1000.0
-                if let v = verdict, let region = reader.regions.regions[v.className] {
-                    t = CFAbsoluteTimeGetCurrent()
-                    let strip = try StripNormalizer.extract(width: decoded.width, height: decoded.height, rgb: decoded.rgb, region: region)
-                    extractMs += (CFAbsoluteTimeGetCurrent() - t) * 1000.0
+                t = CFAbsoluteTimeGetCurrent()
+                let strip = try reader.strip(input, verdict: oriented.verdict, rotation: oriented.rotation)
+                extractMs += (CFAbsoluteTimeGetCurrent() - t) * 1000.0
+                if let strip = strip {
                     t = CFAbsoluteTimeGetCurrent()
                     _ = reader.digitReader.read(strip)
                     readMs += (CFAbsoluteTimeGetCurrent() - t) * 1000.0
@@ -133,6 +138,9 @@ for path in imagePaths {
             print(text)
         }
     } catch {
-        print("{\"path\": \"\(path)\", \"error\": \"\(error)\"}")
+        let object: [String: Any] = ["path": path, "error": "\(error)"]
+        if let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), let text = String(data: data, encoding: .utf8) {
+            print(text)
+        }
     }
 }

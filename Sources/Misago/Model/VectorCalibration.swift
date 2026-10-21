@@ -56,7 +56,9 @@ public struct VectorCalibration: Sendable, Equatable {
     /// invariant to a shared offset). Targets are smoothed as in Platt (1999): the true class gets
     /// (n_y + 1) / (n_y + 2) and the rest is spread over the other classes, so perfectly separable data does not
     /// drive the scale to infinity. Returns the identity when there are fewer than two samples or a single class.
-    public static func fit(logits: [[Float]], labels: [Int], classCount: Int, iterations: Int = 100) -> VectorCalibration {
+    /// With `fitBias` false only the scale is fitted (temperature scaling) and every bias stays zero: per-class
+    /// biases fitted on a small held-out set follow its few samples of the rare classes.
+    public static func fit(logits: [[Float]], labels: [Int], classCount: Int, iterations: Int = 100, fitBias: Bool = true) -> VectorCalibration {
         let n = min(logits.count, labels.count)
         let k = classCount
         if n < 2 || k < 2 {
@@ -77,8 +79,8 @@ public struct VectorCalibration: Sendable, Equatable {
             }
             return (1.0 - top) / Double(k - 1)
         }
-        // Parameters θ = [scale, bias_1 ... bias_{K-1}] (bias_0 = 0).
-        let dim = k
+        // Parameters θ = [scale, bias_1 ... bias_{K-1}] (bias_0 = 0), or [scale] alone.
+        let dim = fitBias ? k : 1
         var theta = [Double](repeating: 0.0, count: dim)
         theta[0] = 1.0
 
@@ -87,7 +89,7 @@ public struct VectorCalibration: Sendable, Equatable {
             var peak = -Double.greatestFiniteMagnitude
             var c = 0
             while c < k {
-                z[c] = theta[0] * Double(row[c]) + (0 < c ? theta[c] : 0.0)
+                z[c] = theta[0] * Double(row[c]) + (0 < c && fitBias ? theta[c] : 0.0)
                 peak = max(peak, z[c])
                 c += 1
             }
@@ -136,7 +138,7 @@ public struct VectorCalibration: Sendable, Equatable {
                 while c < k {
                     var u = [Double](repeating: 0.0, count: dim)
                     u[0] = Double(row[c])
-                    if 0 < c {
+                    if 0 < c && fitBias {
                         u[c] = 1.0
                     }
                     let d = p[c] - target(c, labels[i])
@@ -204,7 +206,7 @@ public struct VectorCalibration: Sendable, Equatable {
         }
         var bias = [Float](repeating: 0.0, count: k)
         var c = 1
-        while c < k {
+        while fitBias && c < k {
             bias[c] = Float(theta[c])
             c += 1
         }

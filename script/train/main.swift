@@ -17,6 +17,11 @@ enum Defaults {
     static let minWarmupSteps = 20
     static let batchSize = 64
     static let clipNorm: Float = 5.0
+    static let labelSmoothing: Float = 0.0
+    static let weightDecay: Float = 0.0
+    static let biasCorrection = false
+    /// Calibration fits per-class biases too (vector scaling) instead of the temperature alone.
+    static let calibrationBias = false
     /// Samples compared between MLX and the CPU network after training.
     static let parityCheckSamples = 8
 }
@@ -100,10 +105,13 @@ func openDataset(_ path: String) -> DatasetReader {
 }
 func describe(_ name: String, _ reader: DatasetReader) {
     let counts = reader.classCounts.enumerated().map { "\(reader.classes[$0.offset]) \($0.element)" }.joined(separator: ", ")
-    print("\(name): \(reader.count) samples (\(counts))")
+    print("\(name): \(reader.count) samples (\(counts), none \(reader.noneCount))")
 }
 let trainSet = openDataset(trainPath)
 let classes = trainSet.classes
+/// Independent title outputs follow the screens (the title of `<title>_<screen>` is the part before "_").
+let titles = classes.titles
+let titleOf = classes.names.map { titles.firstIndex(of: ClassList.title(of: $0))! }
 describe("train", trainSet)
 var evalSet: DatasetReader? = nil
 if evalPath.isEmpty != true {
@@ -161,20 +169,32 @@ func batch(_ reader: DatasetReader, _ indices: [Int]) -> (features: [[Float]], l
     return out
 }
 
+/// Held-out outputs split into screens (samples with a class) and titles (every sample).
 struct EvalResult {
-    let loss: Float
-    let logits: [[Float]]
+    /// Screen logits and labels of the samples that have a class.
+    let screenLogits: [[Float]]
     let labels: [Int]
+    /// Sample index (in file order) of each screen row.
+    let screenRows: [Int]
+    /// Title logits [sample][title] and the label of every sample (−1 = none).
+    let titleLogits: [[Float]]
+    let allLabels: [Int]
+    /// Raw screen NLL.
+    let loss: Float
+    /// Full logits (screens then titles), for the parity check.
+    let logits: [[Float]]
+    /// Per sample and title, the feature distance to the title's nearest training class (empty until fitted).
+    var titleDistances: [[Float]] = []
 
     /// Accuracy and confusion matrix [label][predicted] under a calibration (identity = raw logits).
     func summary(calibration: VectorCalibration) -> (accuracy: Float, confusion: [[Int]], probabilities: [[Float]]) {
         var correct = 0
         var confusion = [[Int]](repeating: [Int](repeating: 0, count: classes.count), count: classes.count)
         var probabilities: [[Float]] = []
-        probabilities.reserveCapacity(logits.count)
+        probabilities.reserveCapacity(screenLogits.count)
         var i = 0
-        while i < logits.count {
-            let probs = calibration.probabilities(logits[i])
+        while i < screenLogits.count {
+            let probs = calibration.probabilities(screenLogits[i])
             var predicted = 0
             var c = 1
             while c < probs.count {
@@ -190,49 +210,163 @@ struct EvalResult {
             probabilities.append(probs)
             i += 1
         }
-        return (Float(correct) / Float(max(1, logits.count)), confusion, probabilities)
+        return (Float(correct) / Float(max(1, screenLogits.count)), confusion, probabilities)
+    }
+
+    /// Whether sample `i` belongs to title `t`.
+    func isTitle(_ i: Int, _ t: Int) -> Bool {
+        return 0 <= allLabels[i] && titleOf[allLabels[i]] == t
+    }
+
+    /// Per-title Platt scaling fitted on these samples.
+    func fitTitleCalibration() -> [Float] {
+        var out: [Float] = []
+        var t = 0
+        while t < titles.count {
+            let fit = PlattScaling.fit(logits: titleLogits.map { $0[t] }, targets: (0..<allLabels.count).map { isTitle($0, t) })
+            out.append(fit.scale)
+            out.append(fit.bias)
+            t += 1
+        }
+        return out
+    }
+
+    func titleProbability(_ i: Int, _ t: Int, _ calibration: [Float], _ distanceWeights: [Float] = []) -> Float {
+        var z = calibration[2 * t] * titleLogits[i][t] + calibration[2 * t + 1]
+        if t < distanceWeights.count && i < titleDistances.count {
+            z += distanceWeights[t] * titleDistances[i][t]
+        }
+        return 1.0 / (1.0 + exp(-z))
+    }
+
+    /// Mean binary NLL of the title outputs under a calibration.
+    func titleLoss(_ calibration: [Float]) -> Float {
+        if titles.isEmpty || allLabels.isEmpty {
+            return 0.0
+        }
+        var total: Float = 0.0
+        var i = 0
+        while i < allLabels.count {
+            var t = 0
+            while t < titles.count {
+                let p = titleProbability(i, t, calibration)
+                total -= log(max(isTitle(i, t) ? p : 1.0 - p, 1e-12))
+                t += 1
+            }
+            i += 1
+        }
+        return total / Float(allLabels.count * titles.count)
     }
 }
 
 @MainActor func evaluate(_ trainer: MLXClassificationTrainer, _ reader: DatasetReader) -> EvalResult {
     let logits = allLogits(trainer, reader)
-    let labels = reader.labels
+    let allLabels = reader.labels
+    var screenLogits: [[Float]] = []
+    var labels: [Int] = []
+    var rows: [Int] = []
+    var titleLogits: [[Float]] = []
     var lossSum: Float = 0.0
     var i = 0
     while i < logits.count {
-        lossSum -= HawkNetwork.logSoftmax(logits[i])[labels[i]]
+        let screens = Array(logits[i].prefix(classes.count))
+        titleLogits.append(Array(logits[i].dropFirst(classes.count)))
+        if 0 <= allLabels[i] {
+            screenLogits.append(screens)
+            labels.append(allLabels[i])
+            rows.append(i)
+            lossSum -= HawkNetwork.logSoftmax(screens)[allLabels[i]]
+        }
         i += 1
     }
-    return EvalResult(loss: lossSum / Float(max(1, logits.count)), logits: logits, labels: labels)
+    return EvalResult(
+        screenLogits: screenLogits, labels: labels, screenRows: rows, titleLogits: titleLogits, allLabels: allLabels,
+        loss: lossSum / Float(max(1, labels.count)), logits: logits
+    )
 }
 
-/// Accuracy, confusion and ECE, all judged on the calibrated probabilities (the same rule `classify` uses).
-func report(_ name: String, _ r: EvalResult, calibration: VectorCalibration) {
+/// Pooled features of every sample of a dataset, in order.
+@MainActor func allPooled(_ trainer: MLXClassificationTrainer, _ reader: DatasetReader) -> [[Float]] {
+    var out: [[Float]] = []
+    out.reserveCapacity(reader.count)
+    var start = 0
+    while start < reader.count {
+        let end = min(reader.count, start + batchSize)
+        out.append(contentsOf: trainer.pooled(features: batch(reader, Array(start..<end)).features))
+        start = end
+    }
+    return out
+}
+
+/// Per sample and title, the distance to the nearest class mean of that title.
+func titleDistances(_ pooled: [[Float]], _ distance: FeatureDistance) -> [[Float]] {
+    return pooled.map { feature in
+        let perClass = distance.distances(feature)
+        var out = [Float](repeating: Float.greatestFiniteMagnitude, count: titles.count)
+        for (c, d) in perClass.enumerated() {
+            out[titleOf[c]] = min(out[titleOf[c]], d)
+        }
+        return out
+    }
+}
+
+/// Accuracy, confusion and ECE, all judged on the calibrated probabilities (the same rule `classify` uses), then
+/// the title outputs: mean probability on the title's own samples, on other titles' samples and on none.
+func report(_ name: String, _ r: EvalResult, calibration: VectorCalibration, titleCalibration: [Float], distanceWeights: [Float] = []) {
     let s = r.summary(calibration: calibration)
-    print("  \(name): loss \(String(format: "%.4f", r.loss)), accuracy \(String(format: "%.2f", s.accuracy * 100))% (\(r.logits.count) samples, calibrated)")
+    print("  \(name): loss \(String(format: "%.4f", r.loss)), accuracy \(String(format: "%.2f", s.accuracy * 100))% (\(r.labels.count) samples with a class, calibrated)")
     print("    confusion [label -> predicted]:")
     var a = 0
     while a < classes.count {
-        let row = s.confusion[a].enumerated().map { "\(classes[$0.offset]) \($0.element)" }.joined(separator: ", ")
+        let row = s.confusion[a].enumerated().filter { 0 < $0.element }.map { "\(classes[$0.offset]) \($0.element)" }.joined(separator: ", ")
         print("      \(classes[a]) -> \(row)")
         a += 1
     }
     let ece = VectorCalibration.expectedCalibrationError(probabilities: s.probabilities, labels: r.labels)
-    let bias = calibration.bias.map { String(format: "%.3f", $0) }.joined(separator: ", ")
-    print("    ECE \(String(format: "%.4f", ece.ece)) (scale \(String(format: "%.3f", calibration.scale)), bias [\(bias)])")
+    print("    ECE \(String(format: "%.4f", ece.ece)) (scale \(String(format: "%.3f", calibration.scale)))")
+    var t = 0
+    while t < titles.count {
+        var own: [Float] = [], others: [Float] = [], none: [Float] = []
+        var i = 0
+        while i < r.allLabels.count {
+            let p = r.titleProbability(i, t, titleCalibration, distanceWeights)
+            if r.isTitle(i, t) {
+                own.append(p)
+            } else if r.allLabels[i] < 0 {
+                none.append(p)
+            } else {
+                others.append(p)
+            }
+            i += 1
+        }
+        func mean(_ v: [Float]) -> String {
+            return v.isEmpty ? "-" : String(format: "%.3f", v.reduce(0, +) / Float(v.count))
+        }
+        let ownCorrect = own.filter { 0.5 <= $0 }.count
+        let noneCorrect = none.filter { $0 < 0.5 }.count
+        print("    title \(titles[t]): own mean \(mean(own)) (≥0.5: \(ownCorrect)/\(own.count)), none mean \(mean(none)) (<0.5: \(noneCorrect)/\(none.count)), other titles mean \(mean(others)), max on none \(none.max().map { String(format: "%.3f", $0) } ?? "-") (scale \(String(format: "%.3f", titleCalibration[2 * t])), bias \(String(format: "%.3f", titleCalibration[2 * t + 1]))\(t < distanceWeights.count ? ", distance weight \(String(format: "%.3f", distanceWeights[t]))" : ""))")
+        t += 1
+    }
 }
 
 MLXRandom.seed(seed)
-let mlxNetwork = MLXHawkNetwork(classCount: classes.count)
+let mlxNetwork = MLXHawkNetwork(classCount: classes.count + titles.count)
 if let w = importedWeights {
     mlxNetwork.importWeights(from: w)
 }
-let trainer = MLXClassificationTrainer(network: mlxNetwork, learningRate: Defaults.lrMax, clipNorm: Defaults.clipNorm)
-print("Hawk: input \(RowScanEncoder.frameDim) x \(RowScanEncoder.frameCount) frames, layers \(HawkShape.numLayers), width \(HawkShape.modelDim), RNN width \(HawkShape.rnnDim), MLP width \(HawkShape.mlpDim), gate blocks \(HawkShape.heads), conv \(HawkShape.convWidth)+\(HawkShape.convRight), classes \(classes.count)")
-print("  parameters \(mlxNetwork.exportWeights(classes: classes).parameterCount), batch \(batchSize), epochs \(epochs), seed \(seed)")
+let trainer = MLXClassificationTrainer(
+    network: mlxNetwork, learningRate: Defaults.lrMax, clipNorm: Defaults.clipNorm,
+    labelSmoothing: Defaults.labelSmoothing, weightDecay: Defaults.weightDecay, biasCorrection: Defaults.biasCorrection,
+    titleOf: titleOf
+)
+print("Hawk: input \(RowScanEncoder.frameDim) x \(RowScanEncoder.frameCount) frames, layers \(HawkShape.numLayers), width \(HawkShape.modelDim), RNN width \(HawkShape.rnnDim), MLP width \(HawkShape.mlpDim), gate blocks \(HawkShape.heads), conv \(HawkShape.convWidth)+\(HawkShape.convRight), classes \(classes.count), titles \(titles.joined(separator: ", "))")
+print("  parameters \(mlxNetwork.exportWeights(classes: classes, titles: titles).parameterCount), batch \(batchSize), epochs \(epochs), seed \(seed)")
 
-var bestWeights: HawkWeights = importedWeights ?? mlxNetwork.exportWeights(classes: classes)
+var bestWeights: HawkWeights = importedWeights ?? mlxNetwork.exportWeights(classes: classes, titles: titles)
 var calibration = bestWeights.calibration
+var titleCalibration = bestWeights.titleCalibration
+var featureDistance: FeatureDistance? = bestWeights.featureDistance
+var distanceWeights: [Float] = bestWeights.titleDistanceWeight
 
 if 0 < epochs {
     print("\n--- Training ---")
@@ -240,13 +374,12 @@ if 0 < epochs {
     let stepsPerEpoch = (trainSet.count + batchSize - 1) / batchSize
     let totalSteps = max(1, epochs * stepsPerEpoch)
     let warmupSteps = min(max(Defaults.minWarmupSteps, totalSteps / Defaults.warmupStepDivisor), max(1, totalSteps / 2))
-    print("  learning rate \(Defaults.lrMax) -> \(Defaults.lrMin), steps \(totalSteps) (warmup \(warmupSteps)), grad clip \(Defaults.clipNorm)")
+    print("  learning rate \(Defaults.lrMax) -> \(Defaults.lrMin), steps \(totalSteps) (warmup \(warmupSteps)), grad clip \(Defaults.clipNorm), label smoothing \(Defaults.labelSmoothing), weight decay \(Defaults.weightDecay), bias correction \(Defaults.biasCorrection)")
     // The batch order comes from the seed too, so one seed always gives the same run.
     var rng = SplitMix64(seed: seed)
     var indices = Array(0..<trainSet.count)
-    // Selection: highest eval accuracy, ties broken by lower eval loss. Loss alone picks very early epochs
-    // when the frequent classes converge first and the rare, diverse ones are still underfit; calibration
-    // is fitted afterwards, so a somewhat larger loss costs nothing.
+    // Selection: lowest eval loss after temperature scaling, ties broken by higher eval accuracy. Accuracy moves
+    // in steps of one sample on a small held-out set, so choosing by it picks epochs almost at random.
     var bestScore: (accuracy: Float, loss: Float) = (-1.0, Float.greatestFiniteMagnitude)
     var bestEpoch = 0
     var globalStep = 0
@@ -277,14 +410,26 @@ if 0 < epochs {
         if let evalSet = evalSet {
             let r = evaluate(trainer, evalSet)
             let accuracy = r.summary(calibration: .identity(classCount: classes.count)).accuracy
-            line += ", eval loss \(String(format: "%.4f", r.loss)), eval accuracy \(String(format: "%.2f", accuracy * 100))%"
-            score = (accuracy, r.loss)
+            // Loss after temperature scaling: logits keep growing once the training set is fit, which raises the
+            // raw loss even while the ranking still improves; a fitted temperature removes that scale. The title
+            // outputs add their binary loss after Platt scaling, for the same reason.
+            let temperature = VectorCalibration.fit(logits: r.screenLogits, labels: r.labels, classCount: classes.count, fitBias: false)
+            var calibratedLoss: Float = 0.0
+            var i = 0
+            while i < r.screenLogits.count {
+                calibratedLoss -= log(max(temperature.probabilities(r.screenLogits[i])[r.labels[i]], 1e-12))
+                i += 1
+            }
+            calibratedLoss /= Float(max(1, r.screenLogits.count))
+            let titleLoss = r.titleLoss(r.fitTitleCalibration())
+            line += ", eval loss \(String(format: "%.4f", r.loss)) (calibrated \(String(format: "%.4f", calibratedLoss)), titles \(String(format: "%.4f", titleLoss))), eval accuracy \(String(format: "%.2f", accuracy * 100))%"
+            score = (accuracy, calibratedLoss + titleLoss)
         }
         line += " (\(String(format: "%.1f", CFAbsoluteTimeGetCurrent() - epStart)) s, grad norm \(String(format: "%.2f", trainer.lastGradientNorm)))"
-        if bestScore.accuracy < score.accuracy || (bestScore.accuracy == score.accuracy && score.loss < bestScore.loss) {
+        if score.loss < bestScore.loss || (score.loss == bestScore.loss && bestScore.accuracy < score.accuracy) {
             bestScore = score
             bestEpoch = ep
-            bestWeights = mlxNetwork.exportWeights(classes: classes)
+            bestWeights = mlxNetwork.exportWeights(classes: classes, titles: titles)
             line += " *"
         }
         print(line)
@@ -296,13 +441,38 @@ if 0 < epochs {
 
 print("\n--- Evaluation ---")
 if let evalSet = evalSet {
-    let r = evaluate(trainer, evalSet)
+    var r = evaluate(trainer, evalSet)
     if 0 < epochs {
         // The held-out set also selects the epoch, so this calibration is slightly optimistic; a separate set would be cleaner.
-        calibration = VectorCalibration.fit(logits: r.logits, labels: r.labels, classCount: classes.count)
+        calibration = VectorCalibration.fit(logits: r.screenLogits, labels: r.labels, classCount: classes.count, fitBias: Defaults.calibrationBias)
+        titleCalibration = r.fitTitleCalibration()
         print("  calibration fitted on eval: scale \(String(format: "%.3f", calibration.scale))")
     }
-    report("eval", r, calibration: calibration)
+    report("eval", r, calibration: calibration, titleCalibration: titleCalibration)
+    if 0 < epochs && titles.isEmpty != true {
+        // Feature distance: class means and shared covariance of the training features (samples with a class),
+        // then per title a logistic regression on [title logit, distance] fitted on the held-out samples.
+        let trainPooled = allPooled(trainer, trainSet)
+        if let distance = FeatureDistance.fit(features: trainPooled, labels: trainSet.labels, classCount: classes.count) {
+            featureDistance = distance
+            r.titleDistances = titleDistances(allPooled(trainer, evalSet), distance)
+            var weights: [Float] = []
+            var t = 0
+            while t < titles.count {
+                let inputs = (0..<r.allLabels.count).map { [r.titleLogits[$0][t], r.titleDistances[$0][t]] }
+                let fit = LogisticRegression.fit(inputs: inputs, targets: (0..<r.allLabels.count).map { r.isTitle($0, t) })
+                titleCalibration[2 * t] = fit.weights[0]
+                titleCalibration[2 * t + 1] = fit.bias
+                weights.append(fit.weights[1])
+                t += 1
+            }
+            distanceWeights = weights
+            print("  feature distance fitted on \(trainPooled.count) training samples; titles with distance:")
+            report("eval", r, calibration: calibration, titleCalibration: titleCalibration, distanceWeights: distanceWeights)
+        } else {
+            print("  feature distance: covariance not invertible, skipped")
+        }
+    }
     if evalDumpPath.isEmpty != true {
         var paths: [String] = []
         if let metaData = try? Data(contentsOf: URL(fileURLWithPath: evalPath + ".meta.json")),
@@ -312,24 +482,31 @@ if let evalSet = evalSet {
         }
         var lines: [String] = []
         let s = r.summary(calibration: calibration)
+        var screenRow = [Int: Int]()
+        for (k, row) in r.screenRows.enumerated() {
+            screenRow[row] = k
+        }
         var i = 0
-        while i < r.logits.count {
-            let probs = s.probabilities[i]
-            var predicted = 0
-            var c = 1
-            while c < probs.count {
-                if probs[predicted] < probs[c] {
-                    predicted = c
-                }
-                c += 1
-            }
+        while i < r.allLabels.count {
             var row: [String: Any] = [
                 "index": i,
-                "label": classes[r.labels[i]],
-                "predicted": classes[predicted],
-                "correct": predicted == r.labels[i],
-                "probabilities": probs.map { Double(String(format: "%.4f", $0)) ?? 0.0 }
+                "label": r.allLabels[i] < 0 ? "none" : classes[r.allLabels[i]],
+                "titles": Dictionary(uniqueKeysWithValues: titles.enumerated().map { ($0.element, Double(String(format: "%.4f", r.titleProbability(i, $0.offset, titleCalibration, distanceWeights))) ?? 0.0) })
             ]
+            if let k = screenRow[i] {
+                let probs = s.probabilities[k]
+                var predicted = 0
+                var c = 1
+                while c < probs.count {
+                    if probs[predicted] < probs[c] {
+                        predicted = c
+                    }
+                    c += 1
+                }
+                row["predicted"] = classes[predicted]
+                row["correct"] = predicted == r.allLabels[i]
+                row["probabilities"] = probs.map { Double(String(format: "%.4f", $0)) ?? 0.0 }
+            }
             if i < paths.count {
                 row["path"] = paths[i]
             }
@@ -346,12 +523,17 @@ if let evalSet = evalSet {
         }
     }
 }
-let trainResult = evaluate(trainer, trainSet)
-report("train", trainResult, calibration: calibration)
+var trainResult = evaluate(trainer, trainSet)
+if let distance = featureDistance, distanceWeights.isEmpty != true {
+    trainResult.titleDistances = titleDistances(allPooled(trainer, trainSet), distance)
+}
+report("train", trainResult, calibration: calibration, titleCalibration: titleCalibration, distanceWeights: distanceWeights)
 
 // The exported weights must give the same logits on the CPU path.
-var exported = mlxNetwork.exportWeights(classes: classes, calibration: calibration)
+var exported = mlxNetwork.exportWeights(classes: classes, titles: titles, calibration: calibration, titleCalibration: titleCalibration)
 exported.centerMask = centerMask ?? importedWeights?.centerMask
+exported.featureDistance = featureDistance
+exported.titleDistanceWeight = distanceWeights
 let cpu = HawkNetwork(weights: exported)
 var worst: Float = 0.0
 var k = 0

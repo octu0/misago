@@ -30,8 +30,10 @@ public enum DigitHawkShape {
 /// All matrices are row-major [input, output] (applied as x · W).
 ///
 /// Classification reads out the mean over frames of the final RMSNorm output, projected once by `wOut`.
-/// `classNames` names the `outputDim` classes (class 0 is `other`). `calibrationScale` and `calibrationBias`
-/// map logits to calibrated probabilities (vector scaling): p = softmax(scale · logits + bias).
+/// The outputs are `classNames` (screens, a softmax among them) followed by `titleNames` (one independent
+/// sigmoid per title: is this a screen of that title at all?). `calibrationScale` and `calibrationBias` map the
+/// screen logits to calibrated probabilities, p = softmax(scale · logits + bias); `titleCalibration` holds a
+/// (scale, bias) pair per title, p = σ(scale · logit + bias).
 public struct HawkWeights: Sendable, Codable, Equatable {
     public let inputDim: Int
     public let modelDim: Int
@@ -50,9 +52,17 @@ public struct HawkWeights: Sendable, Codable, Equatable {
     public let finalNorm: [Float]    // [modelDim]
     public let wOut: [Float]         // [modelDim, outputDim]
     public let bOut: [Float]         // [outputDim]
-    public let classNames: [String]  // [outputDim]
+    public let classNames: [String]  // screens
     public var calibrationScale: Float
-    public var calibrationBias: [Float]  // [outputDim]
+    public var calibrationBias: [Float]  // [classNames.count]
+    /// Titles after the screens: outputDim = classNames.count + titleNames.count. Empty for plain classifiers.
+    public var titleNames: [String]
+    /// (scale, bias) per title, interleaved.
+    public var titleCalibration: [Float]
+    /// Distance of the pooled features to the training classes, and per title the weight of that distance in
+    /// the title probability: p = σ(scale · logit + distanceWeight · distance + bias). Nil / empty: unused.
+    public var featureDistance: FeatureDistance?
+    public var titleDistanceWeight: [Float]
     /// Optional rectangle [x0, y0, x1, y1] (fractions) blacked out before classification, as in training.
     public var centerMask: [Float]?
 
@@ -80,7 +90,9 @@ public struct HawkWeights: Sendable, Codable, Equatable {
         bOut: [Float],
         classNames: [String],
         calibrationScale: Float = 1.0,
-        calibrationBias: [Float]? = nil
+        calibrationBias: [Float]? = nil,
+        titleNames: [String] = [],
+        titleCalibration: [Float]? = nil
     ) {
         self.inputDim = inputDim
         self.modelDim = modelDim
@@ -98,7 +110,39 @@ public struct HawkWeights: Sendable, Codable, Equatable {
         self.bOut = bOut
         self.classNames = classNames
         self.calibrationScale = calibrationScale
-        self.calibrationBias = calibrationBias ?? [Float](repeating: 0.0, count: outputDim)
+        self.calibrationBias = calibrationBias ?? [Float](repeating: 0.0, count: classNames.count)
+        self.titleNames = titleNames
+        self.titleCalibration = titleCalibration ?? Self.identityTitleCalibration(titleNames.count)
+        self.featureDistance = nil
+        self.titleDistanceWeight = []
+    }
+
+    /// Scale 1, bias 0 for every title.
+    public static func identityTitleCalibration(_ count: Int) -> [Float] {
+        var out: [Float] = []
+        var t = 0
+        while t < count {
+            out.append(1.0)
+            out.append(0.0)
+            t += 1
+        }
+        return out
+    }
+
+    /// Calibrated title probabilities from the title logits (the outputs after the screens) and, when the model
+    /// has a feature distance, the distance of the image to each title's nearest training class.
+    public func titleProbabilities(_ titleLogits: [Float], distances: [Float]? = nil) -> [Float] {
+        var out = [Float](repeating: 0.0, count: titleNames.count)
+        var t = 0
+        while t < titleNames.count && t < titleLogits.count {
+            var z = titleCalibration[2 * t] * titleLogits[t] + titleCalibration[2 * t + 1]
+            if let d = distances, t < d.count, t < titleDistanceWeight.count {
+                z += titleDistanceWeight[t] * d[t]
+            }
+            out[t] = 1.0 / (1.0 + exp(-z))
+            t += 1
+        }
+        return out
     }
 
     public var calibration: VectorCalibration {
@@ -108,6 +152,7 @@ public struct HawkWeights: Sendable, Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case inputDim, modelDim, rnnDim, mlpDim, heads, convWidth, convRight, outputDim
         case wIn, bIn, layers, finalNorm, wOut, bOut, classNames, calibrationScale, calibrationBias, centerMask
+        case titleNames, titleCalibration, featureDistance, titleDistanceWeight
     }
 
     public init(from decoder: Decoder) throws {
@@ -128,8 +173,12 @@ public struct HawkWeights: Sendable, Codable, Equatable {
         bOut = try c.decode([Float].self, forKey: .bOut)
         classNames = try c.decode([String].self, forKey: .classNames)
         calibrationScale = try c.decodeIfPresent(Float.self, forKey: .calibrationScale) ?? 1.0
-        calibrationBias = try c.decodeIfPresent([Float].self, forKey: .calibrationBias) ?? [Float](repeating: 0.0, count: outputDim)
+        calibrationBias = try c.decodeIfPresent([Float].self, forKey: .calibrationBias) ?? [Float](repeating: 0.0, count: classNames.count)
         centerMask = try c.decodeIfPresent([Float].self, forKey: .centerMask)
+        titleNames = try c.decodeIfPresent([String].self, forKey: .titleNames) ?? []
+        titleCalibration = try c.decodeIfPresent([Float].self, forKey: .titleCalibration) ?? Self.identityTitleCalibration(titleNames.count)
+        featureDistance = try c.decodeIfPresent(FeatureDistance.self, forKey: .featureDistance)
+        titleDistanceWeight = try c.decodeIfPresent([Float].self, forKey: .titleDistanceWeight) ?? []
     }
 
     public var numLayers: Int {

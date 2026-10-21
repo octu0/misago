@@ -37,7 +37,7 @@ while argIdx < args.count {
 
 /// Deterministic pseudo-random weights of the default shape with three classes, for timing without a trained model.
 func syntheticWeights() -> HawkWeights {
-    let classes = try! ClassList(others: ["a_home", "b_home"])
+    let classes = try! ClassList(names: ["other"] + ["a_home", "b_home"])
     var state: UInt64 = 0x9E3779B97F4A7C15
     func next() -> Float {
         state = state &* 6364136223846793005 &+ 1442695040888963407
